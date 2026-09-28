@@ -1,0 +1,51 @@
+# One place for every setting. Change things here, not in the code.
+# Folder names for corpora and indexes are built automatically from these settings,
+# so changing a setting below never mixes old and new data.
+
+llm:
+  # Current model name per DeepSeek's changelog (2026-09-10).
+  model: deepseek-flash
+  base_url: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
+  thinking: disabled
+  temperature: 0.0
+
+embedding:
+  # DeepSeek has no embedding API, so embeddings run locally.
+  # Used by LightRAG and RAPTOR. (MedRAG uses its own medical retriever, MedCPT.)
+  model: BAAI/bge-small-en-v1.5
+
+corpora:
+  lightrag:
+    subset: mix          # UltraDomain subset: mix | agriculture | cs | legal (the four used in the LightRAG paper)
+    max_docs: 10         # null = use every document (slow and costly on the big subsets)
+  raptor:
+    split: dev           # QuALITY split: dev | train
+    max_docs: 10         # null = all
+  medrag:
+    max_textbooks: 3     # how many of the 18 MedRAG textbooks to use; null = all 18
+
+lightrag:
+  query_mode: hybrid
+  # Smaller than LightRAG's default 1200 so chunks fit the embedding model's
+  # 512-token window. A deviation from the paper's setup: disclose it.
+  chunk_token_size: 400
+  chunk_overlap_token_size: 50
+
+raptor:
+  repo_dir: third_party/raptor   # RAPTOR's own code, cloned by prepare_corpora.py
+  chunk_tokens: 100              # RAPTOR default
+  num_layers: 5                  # RAPTOR default
+  summary_tokens: 100            # RAPTOR default
+  top_k: 10                      # RAPTOR default
+  max_context_tokens: 3500       # RAPTOR default
+
+medrag:
+  top_k: 32                      # MedRAG's default number of retrieved snippets
+  batch_size: 32                 # snippets embedded at a time when building the index
+
+# Question used by scripts/test_rag.py (you can also pass your own with --question)
+tests:
+  lightrag: "What are the main topics covered in these documents?"
+  raptor: "What happens in the first story?"
+  medrag: "What is the function of the phrenic nerve?"

@@ -1,0 +1,14 @@
+lightrag-hku==1.5.7
+openai
+sentence-transformers
+transformers
+torch
+faiss-cpu
+umap-learn
+scikit-learn
+tenacity
+tiktoken
+huggingface_hub
+numpy
+pyyaml
+python-dotenv

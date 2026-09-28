@@ -1,0 +1,9 @@
+.env
+indexes/
+results/
+data/raw/
+data/corpora/
+third_party/
+__pycache__/
+*.pyc
+.venv/
