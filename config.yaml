@@ -1,6 +1,8 @@
 # One place for every setting. Change things here, not in the code.
-# Folder names for corpora and indexes are built automatically from these settings,
-# so changing a setting below never mixes old and new data.
+# The corpora: settings pick the data folders automatically (a different subset or size gets
+# its own folder). Settings that change how an INDEX is built (embedding model, chunk sizes,
+# ...) do NOT: after changing one, delete that RAG's folder in indexes/ so it is rebuilt.
+# README.md (section 4.9) lists exactly which settings need what.
 
 llm:
   # Current model name per DeepSeek's changelog (2026-09-10).
