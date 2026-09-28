@@ -125,14 +125,15 @@ class RaptorRag(BaseRAG):
         )
         nodes = ra.tree.all_nodes
         # Layer 0 = original text chunks. Higher layers = LLM-written summaries.
-        # We keep them apart so faithfulness can be judged against real source text.
-        contexts, summaries = [], []
-        for info in layer_info:
-            text = nodes[info["node_index"]].text
-            (contexts if info["layer_number"] == 0 else summaries).append(text)
+        # RAPTOR ranks nodes from ALL layers together, so for broad questions the
+        # answer may be built from summaries only. `contexts` keeps everything the
+        # model saw; `source_contexts` keeps just the original chunks (possibly none).
+        texts = [nodes[i["node_index"]].text for i in layer_info]
+        layers = [i["layer_number"] for i in layer_info]
         return {
             "answer": answer,
-            "contexts": contexts,
-            "summaries": summaries,
-            "layers": [i["layer_number"] for i in layer_info],
+            "contexts": texts,
+            "source_contexts": [t for t, l in zip(texts, layers) if l == 0],
+            "summaries": [t for t, l in zip(texts, layers) if l > 0],
+            "layers": layers,
         }

@@ -22,3 +22,14 @@ python scripts/test_rag.py raptor
 python scripts/test_rag.py medrag
 ```
 Sizes (how many documents, which UltraDomain subset, how many textbooks) are in config.yaml.
+
+## Generate benchmark questions
+```
+python scripts/generate_benchmark.py lightrag ragas --dry-run   # plan and cost estimate, calls nothing
+python scripts/generate_benchmark.py lightrag ragas             # or ares | datamorgana | all
+python scripts/generate_benchmark.py all all
+```
+Results go to `results/benchmarks/<rag>_<corpus>/<method>.jsonl` (plus `.rejected.jsonl` and
+`.meta.json` with counts, tokens and time). An interrupted run resumes where it stopped.
+All knobs (benchmark size vs. corpus size, passage size, sampling, filters, ...) are in the
+`benchmark:` section of `config.yaml`.

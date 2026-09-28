@@ -78,13 +78,25 @@ class LightRAGRag(BaseRAG):
             if result.get("status") != "success":
                 raise RuntimeError(f"LightRAG query failed: {result.get('message')}")
             data = result.get("data") or {}
+            chunks = [c["content"] for c in data.get("chunks", [])]
+            entities = data.get("entities", [])
+            relations = data.get("relationships", [])
+            # LightRAG also shows the model LLM-written descriptions of graph entities
+            # and relations. They are part of `contexts` (what the model saw) but not
+            # of `source_contexts` (original text only).
+            graph_text = [
+                f"{e.get('entity_name')} ({e.get('entity_type')}): {e.get('description')}"
+                for e in entities
+            ] + [
+                f"{r.get('src_id')} -> {r.get('tgt_id')}: {r.get('description')}"
+                for r in relations
+            ]
             return {
                 "answer": result["llm_response"]["content"],
-                # Original source text that was retrieved.
-                "contexts": [c["content"] for c in data.get("chunks", [])],
-                # Graph elements (LLM-written descriptions), kept separate on purpose.
-                "graph_entities": data.get("entities", []),
-                "graph_relationships": data.get("relationships", []),
+                "contexts": chunks + graph_text,
+                "source_contexts": chunks,
+                "graph_entities": entities,
+                "graph_relationships": relations,
             }
 
         return self._run(_answer())

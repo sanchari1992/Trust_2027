@@ -1,0 +1,102 @@
+{
+  "_note": "Same question categorizations as datamorgana_general.json. The four healthcare user categories are the ones the DataMorgana paper (Section 4.3) used for its CORD-19 experiment; probabilities are uniform because the paper does not give them.",
+  "user_categorizations": [
+    {
+      "name": "healthcare-user",
+      "categories": [
+        {
+          "name": "patient",
+          "probability": 0.25,
+          "description": "a regular patient who uses the system to get basic health information, symptom checking, and guidance on preventive care."
+        },
+        {
+          "name": "medical-doctor",
+          "probability": 0.25,
+          "description": "a medical doctor who needs to access some advanced information."
+        },
+        {
+          "name": "clinical-researcher",
+          "probability": 0.25,
+          "description": "a clinical researcher who uses the system to access population health data, conduct initial patient surveys, track disease progression patterns, etc."
+        },
+        {
+          "name": "public-health-authority",
+          "probability": 0.25,
+          "description": "a public health authority who uses the system to manage community health information dissemination, be informed on health emergencies, etc."
+        }
+      ]
+    }
+  ],
+  "question_categorizations": [
+    {
+      "name": "factuality",
+      "categories": [
+        {
+          "name": "factoid",
+          "probability": 0.5,
+          "description": "a question seeking a specific, concise piece of information or a short fact about a particular subject, such as a name, date, or number."
+        },
+        {
+          "name": "open-ended",
+          "probability": 0.5,
+          "description": "a question inviting detailed or exploratory responses, encouraging discussion or elaboration."
+        }
+      ]
+    },
+    {
+      "name": "premise",
+      "categories": [
+        {
+          "name": "direct",
+          "probability": 0.5,
+          "description": "a question that does not contain any premise or any information about the user."
+        },
+        {
+          "name": "with-premise",
+          "probability": 0.5,
+          "description": "a question starting with a very short premise, where the user reveals their needs or some information about themselves."
+        }
+      ]
+    },
+    {
+      "name": "phrasing",
+      "categories": [
+        {
+          "name": "concise-and-natural",
+          "probability": 0.25,
+          "description": "phrased in the way people typically speak, reflecting everyday language use, without formal or artificial structure. It is a concise direct question consisting of less than 10 words."
+        },
+        {
+          "name": "verbose-and-natural",
+          "probability": 0.25,
+          "description": "phrased in the way people typically speak, reflecting everyday language use, without formal or artificial structure. It is a relatively long question consisting of more than 9 words."
+        },
+        {
+          "name": "short-search-query",
+          "probability": 0.25,
+          "description": "phrased as a typed web query for search engines (only keywords, without punctuation and without a natural-sounding structure). It consists of less than 7 words."
+        },
+        {
+          "name": "long-search-query",
+          "probability": 0.25,
+          "description": "phrased as a typed web query for search engines (only keywords, without punctuation and without a natural-sounding structure). It consists of more than 6 words."
+        }
+      ]
+    },
+    {
+      "name": "linguistic-variation",
+      "categories": [
+        {
+          "name": "similar-to-document",
+          "probability": 0.5,
+          "description": "phrased using the same terminology and phrases appearing in the document."
+        },
+        {
+          "name": "distant-from-document",
+          "probability": 0.5,
+          "description": "phrased using terms completely different from the ones appearing in the document."
+        }
+      ]
+    }
+  ]
+}

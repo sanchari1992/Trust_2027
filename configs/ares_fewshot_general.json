@@ -1,0 +1,32 @@
+[
+  {
+    "document": "Coral reefs cover less than one percent of the ocean floor, yet they shelter roughly a quarter of all marine species. The reefs are built by tiny animals called polyps, which secrete calcium carbonate skeletons. Many polyps live in partnership with algae that give them food through photosynthesis, so reefs grow best in warm, clear, shallow water.",
+    "query": "Why do coral reefs grow best in shallow, clear water?",
+    "answer": "Reefs grow best in shallow, clear water because the polyps depend on partner algae that feed them through photosynthesis, which needs warm, well-lit water.",
+    "contradictory_answer": "Reefs grow best in deep, dark water because the polyps feed on plankton that sinks from the surface."
+  },
+  {
+    "document": "The city of Karavan rose to prominence in the ninth century as a stop on an overland trading route. Merchants exchanged silk and spices for horses and silver in its central market, and the city collected a tax on every caravan that passed through its eastern gate. When sea routes became cheaper, trade declined and the city slowly emptied.",
+    "query": "How did Karavan earn money from the traders who passed through?",
+    "answer": "Karavan collected a tax on every caravan that entered through its eastern gate, and its central market let merchants trade silk and spices for horses and silver.",
+    "contradictory_answer": "Karavan earned its money by mining silver in the nearby mountains and selling it to sea traders."
+  },
+  {
+    "document": "Marta had not spoken to her brother in six years. When the letter arrived, she left it unopened on the kitchen table for three days, walking around it as if it might bite. On the fourth morning she finally slit the envelope with a butter knife and found only a single line: the address of their childhood house, and a date.",
+    "query": "What was inside the letter Marta received?",
+    "answer": "The letter contained a single line giving the address of the siblings' childhood house and a date.",
+    "contradictory_answer": "The letter contained a long apology from her brother and a check for the money he owed her."
+  },
+  {
+    "document": "Under the lease, the landlord must give the tenant at least sixty days' written notice before raising the rent. Notice delivered verbally has no legal effect. If the landlord fails to give proper notice, the tenant may continue paying the old rent until sixty days have passed from the date written notice is actually received.",
+    "query": "Does a verbal announcement of a rent increase count as valid notice?",
+    "answer": "No. Verbal notice has no legal effect; the landlord must give at least sixty days' written notice before raising the rent.",
+    "contradictory_answer": "Yes. A verbal announcement is valid as long as it is made at least thirty days before the increase."
+  },
+  {
+    "document": "A database index works like the index of a book. Instead of scanning every row in a table to find a match, the database consults a sorted structure, usually a B-tree, that points directly to the matching rows. Indexes make reads faster but slow down writes, because every insert or update must also update the index.",
+    "query": "Why do indexes make writes slower?",
+    "answer": "Every insert or update has to change the index as well as the table, so each write does extra work.",
+    "contradictory_answer": "Indexes slow down writes because they force the database to scan every row of the table before each insert."
+  }
+]

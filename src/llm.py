@@ -4,8 +4,40 @@ Every RAG gets its language model from here. To try a different LLM in the
 "different LLM" experiment, change the llm: section of config.yaml.
 """
 import os
+import threading
 
 from lightrag.llm.openai import openai_complete_if_cache
+
+
+class _Usage:
+    """Counts the plain (non-LightRAG) LLM calls and tokens, for cost reporting."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.reset()
+
+    def reset(self):
+        self.calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+
+    def add(self, usage):
+        with self.lock:
+            self.calls += 1
+            if usage is not None:
+                self.prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
+                self.completion_tokens += getattr(usage, "completion_tokens", 0) or 0
+
+    def snapshot(self):
+        with self.lock:
+            return {
+                "calls": self.calls,
+                "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+            }
+
+
+USAGE = _Usage()
 
 
 def _settings(cfg):
@@ -52,7 +84,7 @@ def get_llm_func(cfg):
 
 def get_chat_func(cfg):
     """Plain (non-async) version, used by RAPTOR and MedRAG.
-    Usage: chat(system_text, user_text, max_tokens=None) -> answer text"""
+    Usage: chat(system_text, user_text, max_tokens=None, temperature=None) -> answer text"""
     from openai import OpenAI
     from tenacity import retry, stop_after_attempt, wait_random_exponential
 
@@ -64,7 +96,7 @@ def get_chat_func(cfg):
         stop=stop_after_attempt(6),
         reraise=True,
     )
-    def chat(system, user, max_tokens=None):
+    def chat(system, user, max_tokens=None, temperature=None):
         kwargs = {}
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
@@ -74,10 +106,11 @@ def get_chat_func(cfg):
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            temperature=c.get("temperature", 0.0),
+            temperature=c.get("temperature", 0.0) if temperature is None else temperature,
             extra_body=extra_body,
             **kwargs,
         )
+        USAGE.add(getattr(response, "usage", None))
         return (response.choices[0].message.content or "").strip()
 
     return chat

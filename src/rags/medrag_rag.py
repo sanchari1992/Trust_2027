@@ -86,7 +86,9 @@ class MedRagRag(BaseRAG):
             for path in self._chunk_files():
                 for line in path.read_text(encoding="utf-8").splitlines():
                     if line.strip():
-                        rows.append(json.loads(line))
+                        row = json.loads(line)
+                        row["_source"] = path.stem  # which textbook this snippet is from
+                        rows.append(row)
             self._snippets = rows
         return self._snippets
 
@@ -98,7 +100,7 @@ class MedRagRag(BaseRAG):
     # ---- the three functions every RAG provides -------------------------
     def load_corpus(self):
         return [
-            {"id": s["id"], "text": s["content"], "title": s["title"]}
+            {"id": s["id"], "text": s["content"], "title": s["title"], "group": s["_source"]}
             for s in self._get_snippets()
         ]
 
@@ -176,6 +178,7 @@ class MedRagRag(BaseRAG):
         return {
             "answer": answer,
             "contexts": [s["content"] for s, _ in hits],
+            "source_contexts": [s["content"] for s, _ in hits],
             "context_meta": [
                 {"id": s["id"], "title": s["title"], "score": sc} for s, sc in hits
             ],

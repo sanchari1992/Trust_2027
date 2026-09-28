@@ -1,0 +1,32 @@
+[
+  {
+    "document": "The phrenic nerve arises mainly from the C4 root of the cervical plexus, with contributions from C3 and C5. It descends through the neck and thorax and provides the only motor supply to the diaphragm. Injury to the nerve can therefore cause paralysis of the diaphragm on the affected side.",
+    "query": "Which structure receives its only motor supply from the phrenic nerve?",
+    "answer": "The diaphragm receives its only motor supply from the phrenic nerve.",
+    "contradictory_answer": "The intercostal muscles receive their only motor supply from the phrenic nerve."
+  },
+  {
+    "document": "Metformin lowers blood glucose mainly by decreasing glucose production in the liver and by improving the sensitivity of peripheral tissues to insulin. Unlike sulfonylureas, it does not stimulate insulin secretion from the pancreas, so it rarely causes hypoglycemia when used alone.",
+    "query": "Why does metformin rarely cause low blood sugar when taken alone?",
+    "answer": "Metformin does not stimulate insulin secretion from the pancreas; it reduces liver glucose production and improves insulin sensitivity, so hypoglycemia is uncommon when it is used alone.",
+    "contradictory_answer": "Metformin rarely causes low blood sugar because it strongly stimulates the pancreas to release insulin only when glucose is high."
+  },
+  {
+    "document": "Warfarin acts by inhibiting vitamin K epoxide reductase, which reduces the regeneration of active vitamin K. As a result the liver produces fewer functional clotting factors II, VII, IX and X. Its effect is monitored with the prothrombin time, reported as the INR.",
+    "query": "How is the anticoagulant effect of warfarin monitored?",
+    "answer": "The effect of warfarin is monitored with the prothrombin time, reported as the INR.",
+    "contradictory_answer": "The effect of warfarin is monitored with the platelet count, reported as the INR."
+  },
+  {
+    "document": "Iron deficiency anemia typically produces small, pale red blood cells, described as microcytic and hypochromic. Serum ferritin is low, and total iron-binding capacity is high. Common causes include chronic blood loss, poor dietary intake and impaired absorption.",
+    "query": "What do the red blood cells look like in iron deficiency anemia?",
+    "answer": "They are small and pale, which is described as microcytic and hypochromic.",
+    "contradictory_answer": "They are unusually large and densely stained, which is described as macrocytic and hyperchromic."
+  },
+  {
+    "document": "The sinoatrial node, located in the wall of the right atrium near the entrance of the superior vena cava, is the natural pacemaker of the heart. It depolarizes spontaneously faster than any other cardiac tissue, so it sets the heart rate. The impulse then spreads through the atria to the atrioventricular node.",
+    "query": "Where is the heart's natural pacemaker located?",
+    "answer": "The natural pacemaker, the sinoatrial node, is located in the wall of the right atrium near the entrance of the superior vena cava.",
+    "contradictory_answer": "The natural pacemaker, the atrioventricular node, is located in the wall of the left ventricle."
+  }
+]

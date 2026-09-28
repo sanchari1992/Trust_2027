@@ -38,15 +38,19 @@ def main():
     result = rag.answer(question)
 
     print("\nANSWER:\n", result["answer"])
-    print(f"\nRETRIEVED SOURCE PASSAGES: {len(result['contexts'])}")
+    print(f"\nCONTEXT PIECES THE MODEL SAW: {len(result['contexts'])}")
     for i, text in enumerate(result["contexts"][:5], 1):
         print(f"  [{i}] {text[:150].strip()!r}...")
+    print(f"ORIGINAL SOURCE PASSAGES AMONG THEM: {len(result['source_contexts'])}")
     for key in ("summaries", "graph_entities", "graph_relationships"):
         if key in result:
             print(f"{key.upper()}: {len(result[key])}")
+    if not result["source_contexts"]:
+        print("NOTE: no original text was retrieved, only summaries/graph text (normal for broad "
+              "questions with RAPTOR). Ask a more specific question to see source passages.")
 
     ok = bool(result["answer"].strip()) and len(result["contexts"]) > 0
-    print("\nTEST PASSED" if ok else "\nTEST FAILED: empty answer or no retrieved passages")
+    print("\nTEST PASSED" if ok else "\nTEST FAILED: empty answer or nothing retrieved")
     rag.close()
 
 

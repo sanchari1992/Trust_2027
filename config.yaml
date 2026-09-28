@@ -49,3 +49,57 @@ tests:
   lightrag: "What are the main topics covered in these documents?"
   raptor: "What happens in the first story?"
   medrag: "What is the function of the phrenic nerve?"
+
+# ------------------------------------------------------------------------
+# Benchmark generation (RAGAS / ARES / DataMorgana). Every knob is here.
+# ------------------------------------------------------------------------
+benchmark:
+  seed: 42                        # same seed + same settings = same passages picked
+  output_dir: results/benchmarks
+
+  # HOW MANY questions. Two ways to say it:
+  #   mode: ratio  -> questions_per_1k_words x (corpus size in words / 1000), kept between min and max
+  #   mode: count  -> exactly `count` questions
+  size:
+    mode: ratio
+    questions_per_1k_words: 2.0
+    count: 100
+    min_questions: 20
+    max_questions: 300
+
+  # Size of the text unit a question is generated from, per method (in words).
+  # Defaults are guesses from the papers: RAGAS used Wikipedia intro sections, ARES used short
+  # KILT-style passages, DataMorgana used whole documents (here capped to one passage).
+  passage_words:
+    ragas: 250
+    ares: 100
+    datamorgana: 300
+  min_passage_words: 40           # drops tiny leftover fragments at the end of a document
+
+  sampling: spread                # spread = take turns between documents | random | sequential
+  max_questions_per_passage: 1    # 1 = every question comes from a different passage
+  max_attempts_factor: 3          # give up after target x this many attempts (filters reject some)
+  concurrency: 8                  # LLM calls in parallel (lower it if DeepSeek rate-limits you)
+  temperature: 0.0                # 0 = repeatable; raise for more varied questions
+  dedupe_threshold: 0.9           # drop a question whose meaning is this close (cosine) to an earlier one; null = off
+  drop_context_references: true   # drop questions saying "in the passage / given context" (not in the papers)
+
+  ragas: {}                       # the RAGAs paper's question prompt has no settings
+
+  ares:
+    fewshot:                      # in-domain examples; replace with examples from YOUR corpus if you can
+      lightrag: configs/ares_fewshot_general.json
+      raptor: configs/ares_fewshot_general.json
+      medrag: configs/ares_fewshot_medical.json
+    n_fewshot: 5
+    roundtrip_filter: true        # keep a query only if it retrieves its own passage
+    roundtrip_top_k: 1            # the paper requires rank 1; raise to be more lenient
+    negatives: false              # also make the paper's negatives for judge training (1 extra LLM call each)
+
+  datamorgana:
+    categorizations:              # who asks, and what kinds of questions (edit these JSON files freely)
+      lightrag: configs/datamorgana_general.json
+      raptor: configs/datamorgana_general.json
+      medrag: configs/datamorgana_medical.json
+    candidates_per_call: 3        # k in the paper
+    filter: true                  # the paper's quality filter (1 extra LLM call per attempt)
