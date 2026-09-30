@@ -12,3 +12,8 @@ huggingface_hub
 numpy
 pyyaml
 python-dotenv
+datasets
+spacy
+scipy
+matplotlib
+networkx

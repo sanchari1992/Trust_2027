@@ -410,3 +410,67 @@ Extra fields: LightRAG adds `graph_entities` and `graph_relationships`; RAPTOR a
 - **DataMorgana:** the paper does not publish its filter prompt or the probabilities of its question categories; the filter prompt is ours and the probabilities are uniform.
 - **`drop_context_references`:** an extra filter that is not in any of the three papers.
 - **Passage size:** the papers generate questions from different kinds of text units; here every method works on passages of `passage_words` words.
+
+---
+
+## 10. Real queries and comparing question sets
+
+### Downloading real user-to-LLM queries
+
+```bash
+python scripts/prepare_real_queries.py general    # WildChat-1M + LMSYS-Chat-1M, first user turn
+python scripts/prepare_real_queries.py medical     # HealthChat-11K's flagged health turns
+python scripts/prepare_real_queries.py all
+```
+
+**Before this works**, both source datasets are gated on Hugging Face:
+1. Log in at huggingface.co and request access on both dataset pages: `lmsys/lmsys-chat-1m` and `allenai/WildChat-1M`. Access is granted by the dataset owners, so request it early; it is not instant.
+2. Create a read-access token at huggingface.co/settings/tokens and add `HF_TOKEN=...` to `.env`.
+
+Both datasets are streamed (not fully downloaded), and `general` uses reservoir sampling so every conversation has an equal chance of being picked without loading the whole stream. Results go to `data/real_queries/general.jsonl` and `medical.jsonl`, one user turn per line: `{"id", "text", "source", "domain", ...}`.
+
+**On `medical`:** it pulls HealthChat-11K's own annotation file (`yahskapar/HealthChat-11K` on Hugging Face) and pulls each annotated conversation's flagged turn from the same two source datasets, following the approach in HealthChat's own `generate_artifacts.py`. I have not been able to confirm the exact field names in that annotation file (`user_turn_index`, `dataset_source`, `specialty`), so **check the first run's output against a few rows of the annotation file itself** before trusting it; the field names may need a small fix.
+
+| `real_queries.*` setting | Default | What it does |
+|---|---|---|
+| `real_queries.output_dir` | `data/real_queries` | Where the two files are written. |
+| `real_queries.spacy_model` | `en_core_web_sm` | Model used both here and by the comparison step below. Run `python -m spacy download <name>` for a different one. |
+| `real_queries.general.sources` | `[wildchat, lmsyschat]` | Which source datasets to draw from. |
+| `real_queries.general.n_per_source` | `2000` | How many conversations to sample from EACH source. |
+| `real_queries.general.languages` | `[en]` | Keep only these languages; `null` = keep all. |
+| `real_queries.general.min_words` / `max_words` | `3` / `200` | Drop near-empty turns and unusually long pastes (code dumps, whole documents). |
+| `real_queries.medical.n` | `2000` | How many HealthChat-11K conversations to use; `null` = all (~11,000). |
+
+### Comparing question sets
+
+```bash
+# real queries vs. every generated benchmark found under results/benchmarks/
+python scripts/compare_queries.py --all-benchmarks --domain general
+python scripts/compare_queries.py --all-benchmarks --domain medical
+
+# any two question sets
+python scripts/compare_queries.py \
+    --a data/real_queries/general.jsonl --a-field text --a-name real \
+    --b results/benchmarks/lightrag_mix_10/ragas.jsonl --b-field question --b-name ragas \
+    --limit 500   # optional: cap per set, for a quick trial
+```
+
+Each comparison computes, for every question, **13 graph features** (from a lightweight dependency+entity graph built with spaCy: node/edge counts, density, depth, components, entity counts, wh-word, whether the root is a verb — see `src/analysis/graph_features.py`) and **12 lexical features** (length, lexical diversity, hedging words, first-person, politeness markers, punctuation habits — see `src/analysis/lexical_features.py`). No LLM calls are made, so this scales to tens of thousands of real queries cheaply.
+
+It reports two things:
+- **Per feature:** the mean in each set, their difference with a bootstrapped 95% confidence interval, and a Mann-Whitney U test p-value, corrected for testing 25 features at once (Benjamini-Hochberg `q_value`).
+- **A classifier two-sample test:** a logistic regression trained on these features to tell the two sets apart, reported as held-out AUC (0.5 = indistinguishable, 1.0 = perfectly separable) plus 5-fold cross-validation on the training split and the top features driving the separation. This is the graph-independent check for circularity discussed for Benchmark+: once questions are mutated to look more like real queries, this AUC dropping toward 0.5 is evidence the mutation worked, independent of the graph features used to design the mutations.
+
+Results go to `results/analysis/<a-name>_vs_<b-name>/`: `features.csv` (every question's raw feature values), `feature_table.csv`, `summary.json`, and a human-readable `report.md`.
+
+| `analysis.*` setting | Default | What it does |
+|---|---|---|
+| `analysis.output_dir` | `results/analysis` | Where comparison results are written. |
+| `analysis.classifier_test_size` | `0.3` | Fraction of each set held out to report the classifier's AUC on. |
+| `analysis.classifier_cv_folds` | `5` | Cross-validation folds on the remaining training part. |
+| `analysis.bootstrap_samples` | `2000` | Resamples used for each feature's confidence interval. |
+| `analysis.seed` | `42` | Random seed (data split, cross-validation, bootstrap). |
+
+A warning is printed if either set has fewer than 20 questions; treat results that small as a pilot, not a finding.
+
+**Known limitation of the graph:** a content word whose only path to another kept word runs through a stopword that is the sentence root (e.g. "keep" in "keep crashing") ends up in its own component instead of connected to its sibling. This is a simplification of the collapsing rule, not a crash or missing feature. Because it is applied identically to every question in both sets, it does not favor one set over the other in a comparison, but it means `n_components` slightly overcounts true structural pieces. Full constituency parsing would avoid it, at the cost of a heavier dependency.

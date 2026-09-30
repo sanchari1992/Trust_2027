@@ -105,3 +105,39 @@ benchmark:
       medrag: configs/datamorgana_medical.json
     candidates_per_call: 3        # k in the paper
     filter: true                  # the paper's quality filter (1 extra LLM call per attempt)
+
+# ------------------------------------------------------------------------
+# Real user queries, for comparison with our generated benchmarks.
+# ------------------------------------------------------------------------
+real_queries:
+  output_dir: data/real_queries
+  spacy_model: en_core_web_sm       # small + fast; en_core_web_trf is more accurate but much slower
+
+  general:
+    # First user turn only, from two large real-world chat logs. Both need a
+    # Hugging Face account that has requested and been granted access on the
+    # dataset's page, and a token in .env as HF_TOKEN (see README section 10).
+    sources: [wildchat, lmsyschat]
+    n_per_source: 2000     # how many conversations to sample from EACH source
+    languages: [en]        # keep only these detected/declared languages; null = keep all
+    min_words: 3           # drop near-empty turns ("hi", "ok")
+    max_words: 200         # drop unusually long pastes (code dumps, whole documents)
+    seed: 42
+
+  medical:
+    # HealthChat-11K: the flagged health-seeking turn from each conversation,
+    # pulled from the same two source datasets using HealthChat's own annotation file.
+    n: 2000                 # null = use all ~11,000
+    min_words: 3
+    max_words: 200
+    seed: 42
+
+# ------------------------------------------------------------------------
+# Comparing question sets (real queries vs. generated benchmarks).
+# ------------------------------------------------------------------------
+analysis:
+  output_dir: results/analysis
+  classifier_test_size: 0.3   # fraction of each set held out to test the real-vs-generated classifier
+  classifier_cv_folds: 5      # cross-validation folds on the training part (reported alongside the held-out score)
+  seed: 42
+  bootstrap_samples: 2000     # for confidence intervals on each feature's difference
