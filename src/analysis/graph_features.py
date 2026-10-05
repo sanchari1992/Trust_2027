@@ -53,7 +53,7 @@ def question_graph(text, nlp):
 
     g.graph["n_tokens"] = len(doc)
     g.graph["n_sentences"] = len(list(doc.sents))
-    g.graph["root_pos"] = doc[0].pos_ if len(doc) else None
+    g.graph["first_pos"] = doc[0].pos_ if len(doc) else None  # POS of the FIRST token (not the dependency root)
     g.graph["wh_word"] = next((t.text.lower() for t in doc if t.tag_ in ("WP", "WRB", "WDT")), None)
     g.graph["entities"] = [(ent.text, ent.label_) for ent in doc.ents]
     return g
@@ -95,14 +95,14 @@ def graph_features(g):
         "n_entity_types": len(set(ent_labels)),
         "has_wh_word": int(g.graph.get("wh_word") is not None),
         "wh_word": g.graph.get("wh_word"),
-        "root_is_verb": int(g.graph.get("root_pos") == "VERB"),
+        "starts_with_verb": int(g.graph.get("first_pos") == "VERB"),  # was misnamed root_is_verb
     }
 
 
 NUMERIC_FEATURES = [
     "n_tokens", "n_sentences", "n_nodes", "n_edges", "graph_density", "avg_degree",
     "max_depth", "n_components", "largest_component_frac", "n_entities",
-    "n_entity_types", "has_wh_word", "root_is_verb",
+    "n_entity_types", "has_wh_word", "starts_with_verb",
 ]
 
 

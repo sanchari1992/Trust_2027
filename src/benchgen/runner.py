@@ -101,6 +101,11 @@ def run(rag_name, method, cfg, dry_run=False, fresh=False):
 
     docs = get_rag(rag_name, cfg).load_corpus()
     if not docs:
+        if dry_run:  # planning before the corpus is downloaded is normal; do not fail
+            print(f"\n=== {rag_name} / {method} ===\nNo corpus on disk yet for '{rag_name}' "
+                  f"(corpus folder: {corpus_tag(cfg, rag_name)}). Run: python scripts/prepare_corpora.py {rag_name}; "
+                  "the plan can only be shown after that.")
+            return None
         raise RuntimeError(f"No corpus for {rag_name}. Run: python scripts/prepare_corpora.py {rag_name}")
     passages = build_passages(docs, words, bc["min_passage_words"])
     if not passages:

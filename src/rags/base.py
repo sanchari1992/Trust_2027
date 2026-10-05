@@ -1,4 +1,5 @@
 """The shared shape every RAG in this project follows."""
+from concurrent.futures import ThreadPoolExecutor
 
 
 class BaseRAG:
@@ -24,6 +25,29 @@ class BaseRAG:
                                          summaries). Use it for a stricter check.
         Some RAGs add extra fields (summaries, graph_entities, ...)."""
         raise NotImplementedError
+
+    def answer_batch(self, questions, concurrency=4):
+        """Answer many questions, several at a time. Returns one dict per question,
+        in order. A question that fails gives {"error": "..."} instead of raising,
+        so one bad question never stops a long evaluation run."""
+        if not questions:
+            return []
+
+        def one(i):
+            try:
+                return self.answer(questions[i])
+            except Exception as e:
+                return {"error": f"{type(e).__name__}: {e}"[:300]}
+
+        results = [None] * len(questions)
+        # The first question runs alone: it loads models/indexes once, before any
+        # threads start (two threads loading the same model would waste memory).
+        results[0] = one(0)
+        if len(questions) > 1:
+            with ThreadPoolExecutor(max(1, concurrency)) as pool:
+                for i, r in zip(range(1, len(questions)), pool.map(one, range(1, len(questions)))):
+                    results[i] = r
+        return results
 
     def close(self):
         pass

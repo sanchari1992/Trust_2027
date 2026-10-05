@@ -1,0 +1,284 @@
+"""Analysis of evaluation results: do mutated benchmarks expose more hallucinations?
+
+Outcomes per answer (see judge.py):  hallucinated, unfaithful, failed (= not correct), abstained.
+All comparisons against the baseline are PAIRED: the same question, original vs mutated.
+"""
+import numpy as np
+import pandas as pd
+from scipy import stats
+
+from src.analysis.compare import _benjamini_hochberg
+from src.benchgen.common import read_jsonl
+from src.config import ROOT
+from src.mutate.common import CONDITION_LABELS, CONDITIONS
+
+METRICS = {"hallucinated": "Hallucination rate", "failed": "Failure rate (not correct)"}
+
+
+# ------------------------------------------------------------------ loading
+def load_results(cfg):
+    base = ROOT / cfg["evaluation"]["output_dir"]
+    rows = []
+    for f in sorted(base.glob("*/*/*.jsonl")):
+        rows += read_jsonl(f)
+    if not rows:
+        raise RuntimeError(f"No evaluation results under {base}. Run scripts/evaluate_benchmarks.py first.")
+    df = pd.DataFrame(rows)
+    for col in ("rag_error", "judge_error", "hallucinated", "correct", "unfaithful", "abstained",
+                "faithfulness", "label", "kind", "operators"):
+        if col not in df.columns:
+            df[col] = None
+    df["valid"] = df["hallucinated"].notna() & df["rag_error"].isna()
+    n_bad = int((~df["valid"]).sum())
+    if n_bad:
+        print(f"NOTE: {n_bad} of {len(df)} answers have no judgement (RAG or judge errors) and are left out.")
+    df = df[df["valid"]].copy()
+    df["hallucinated"] = df["hallucinated"].astype(float)
+    df["failed"] = 1.0 - df["correct"].astype(float)
+    df["unfaithful"] = df["unfaithful"].astype(float)
+    df["abstained"] = df["abstained"].astype(float)
+    df["condition"] = pd.Categorical(df["condition"], [c for c in CONDITIONS if c in set(df["condition"])], ordered=True)
+    return df.reset_index(drop=True)
+
+
+# ------------------------------------------------------------------ statistics
+def wilson(k, n, z=1.96):
+    if n == 0:
+        return float("nan"), float("nan")
+    p = k / n
+    d = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / d
+    half = z * np.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return float(centre - half), float(centre + half)
+
+
+def paired_bootstrap_diff(x, y, n_samples, rng):
+    """95% interval for mean(y) - mean(x) over the SAME items."""
+    n = len(x)
+    if n < 2:
+        return float("nan"), float("nan")
+    idx = rng.integers(0, n, size=(n_samples, n))
+    diffs = y[idx].mean(axis=1) - x[idx].mean(axis=1)
+    return float(np.percentile(diffs, 2.5)), float(np.percentile(diffs, 97.5))
+
+
+def mcnemar_exact(b, c):
+    """b = fine in baseline but failing in the mutated version; c = the reverse."""
+    return float(stats.binomtest(b, b + c, 0.5).pvalue) if b + c > 0 else 1.0
+
+
+# ------------------------------------------------------------------ tables
+def _levels(df):
+    """The same data viewed per (rag, method), per rag (pooled over methods), and overall."""
+    yield "rag_method", df
+    yield "rag", df.assign(method="ALL")
+    yield "overall", df.assign(rag="ALL", method="ALL")
+
+
+def summary_table(df):
+    out = []
+    for level, d in _levels(df):
+        for (rag, method, cond), g in d.groupby(["rag", "method", "condition"], observed=True):
+            n, k = len(g), int(g["hallucinated"].sum())
+            lo, hi = wilson(k, n)
+            out.append({"level": level, "rag": rag, "method": method, "condition": cond, "n": n,
+                        "hallucination_rate": k / n, "hall_ci_low": lo, "hall_ci_high": hi,
+                        "failure_rate": g["failed"].mean(), "unfaithful_rate": g["unfaithful"].mean(),
+                        "abstain_rate": g["abstained"].mean(), "mean_faithfulness": g["faithfulness"].astype(float).mean()})
+    return pd.DataFrame(out)
+
+
+def _wide(df, metric):
+    return df.pivot_table(index=["rag", "method", "id"], columns="condition", values=metric,
+                          aggfunc="first", observed=True)
+
+
+def paired_table(df, n_boot, seed):
+    rng = np.random.default_rng(seed)
+    rows = []
+    for metric in METRICS:
+        wide = _wide(df, metric)
+        if "baseline" not in wide:
+            continue
+        groupings = [("rag_method", ["rag", "method"]), ("rag", ["rag"]), ("overall", [])]
+        for level, keys in groupings:
+            for cond in [c for c in wide.columns if c != "baseline"]:
+                sub = wide[["baseline", cond]].dropna().reset_index()
+                parts = sub.groupby(keys) if keys else [((), sub)]
+                for key, g in parts:
+                    key = key if isinstance(key, tuple) else (key,)
+                    x, y = g["baseline"].to_numpy(float), g[cond].to_numpy(float)
+                    b, c = int(((x == 0) & (y == 1)).sum()), int(((x == 1) & (y == 0)).sum())
+                    lo, hi = paired_bootstrap_diff(x, y, n_boot, rng)
+                    rows.append({
+                        "level": level, "metric": metric,
+                        "rag": key[0] if len(key) > 0 else "ALL", "method": key[1] if len(key) > 1 else "ALL",
+                        "condition": cond, "n_pairs": len(g), "baseline_rate": x.mean(), "condition_rate": y.mean(),
+                        "diff": y.mean() - x.mean(), "diff_ci_low": lo, "diff_ci_high": hi,
+                        "newly_failing": b, "newly_passing": c, "p_mcnemar": mcnemar_exact(b, c)})
+    t = pd.DataFrame(rows)
+    t["q_value"] = np.nan
+    for m in t["metric"].unique():  # correct for the number of tests within each metric
+        mask = t["metric"] == m
+        t.loc[mask, "q_value"] = _benjamini_hochberg(t.loc[mask, "p_mcnemar"].to_numpy())
+    return t
+
+
+def coverage_table(df):
+    """How many hallucinations does the benchmark alone find, versus benchmark + mutations?"""
+    wide = _wide(df, "hallucinated")
+    if "baseline" not in wide:
+        return pd.DataFrame()
+    mut = [c for c in wide.columns if c != "baseline"]
+    rows = []
+    for level, keys in (("rag_method", ["rag", "method"]), ("rag", ["rag"]), ("overall", [])):
+        w = wide.dropna(subset=["baseline"]).reset_index()
+        parts = w.groupby(keys) if keys else [((), w)]
+        for key, g in parts:
+            key = key if isinstance(key, tuple) else (key,)
+            base = g["baseline"].to_numpy(float)
+            any_mut = g[mut].max(axis=1, skipna=True).fillna(0).to_numpy(float) if mut else np.zeros(len(g))
+            union = np.maximum(base, any_mut)
+            rows.append({
+                "level": level, "rag": key[0] if len(key) > 0 else "ALL", "method": key[1] if len(key) > 1 else "ALL",
+                "n_questions": len(g), "found_by_benchmark": int(base.sum()),
+                "found_by_benchmark_plus_mutations": int(union.sum()),
+                "extra_found_by_mutations": int(union.sum() - base.sum()),
+                "benchmark_rate": base.mean(), "union_rate": union.mean(),
+                "fold_increase": (union.sum() / base.sum()) if base.sum() else float("nan")})
+    return pd.DataFrame(rows)
+
+
+def operator_table(df):
+    wide = _wide(df, "hallucinated")
+    rows = []
+    for cond in [c for c in ("m1", "m2", "m3") if c in set(df["condition"])]:
+        d = df[df["condition"] == cond]
+        ex = d.explode("operators").dropna(subset=["operators"])
+        for op, g in ex.groupby("operators"):
+            keys = list(zip(g["rag"], g["method"], g["id"]))
+            base = wide["baseline"].reindex(keys).to_numpy(float) if "baseline" in wide else np.full(len(keys), np.nan)
+            m = ~np.isnan(base)
+            rows.append({"condition": cond, "operator": op, "n": len(g),
+                         "hallucination_rate": g["hallucinated"].mean(),
+                         "baseline_rate_same_questions": float(np.nanmean(base)) if m.any() else float("nan"),
+                         "failure_rate": g["failed"].mean(), "mean_faithfulness": g["faithfulness"].astype(float).mean()})
+    return pd.DataFrame(rows)
+
+
+def m3_table(df):
+    d = df[df["condition"].isin(["m3", "m123"])].copy()
+    if d.empty:
+        return pd.DataFrame()
+    d["m3_operator"] = d["operators"].apply(lambda o: next((x for x in (o or []) if str(x).startswith("m3:")), None))
+    return (d.groupby(["condition", "kind", "m3_operator"], observed=True)
+              .agg(n=("id", "size"), hallucination_rate=("hallucinated", "mean"),
+                   failure_rate=("failed", "mean"), unfaithful_rate=("unfaithful", "mean"))
+              .reset_index())
+
+
+def label_table(df):
+    return (df.groupby(["condition", "expected_behavior", "label"], observed=True)
+              .size().rename("n").reset_index())
+
+
+# ------------------------------------------------------------------ report
+def _fmt(v):
+    if isinstance(v, float):
+        return "" if np.isnan(v) else (f"{v:.3f}" if abs(v) < 100 else f"{v:,.0f}")
+    return str(v)
+
+
+def df_to_md(df, cols=None):
+    cols = cols or list(df.columns)
+    lines = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
+    for _, r in df.iterrows():
+        lines.append("| " + " | ".join(_fmt(r[c]) for c in cols) + " |")
+    return "\n".join(lines)
+
+
+def write_report(out_dir, summary, paired, coverage, operators, m3, labels, cfg):
+    s = summary[summary["level"] == "overall"].copy()
+    s["condition"] = s["condition"].astype(str).map(CONDITION_LABELS)
+    p = paired[(paired["level"] == "overall") & (paired["metric"] == "hallucinated")].copy()
+    p["condition"] = p["condition"].map(CONDITION_LABELS)
+    lines = ["# Benchmark vs Benchmark+ : hallucination results", "",
+             f"Profile: `{cfg['_profile']}`. Faithfulness threshold: {cfg['evaluation']['faithfulness_threshold']}. "
+             "All mutated results are compared with the original benchmark question by question (paired).", "",
+             "## All RAGs and methods pooled", "",
+             df_to_md(s, ["condition", "n", "hallucination_rate", "hall_ci_low", "hall_ci_high", "failure_rate",
+                          "unfaithful_rate", "abstain_rate", "mean_faithfulness"]), "",
+             "## Paired change in hallucination rate vs the original benchmark (pooled)", "",
+             "`diff` is condition minus baseline with a 95% paired-bootstrap interval; `newly_failing` = questions the RAG "
+             "handled in the benchmark but hallucinated on in the mutated version; `newly_passing` = the reverse; "
+             "`q_value` = McNemar exact test, Benjamini-Hochberg corrected.", "",
+             df_to_md(p, ["condition", "n_pairs", "baseline_rate", "condition_rate", "diff", "diff_ci_low",
+                          "diff_ci_high", "newly_failing", "newly_passing", "q_value"]), ""]
+    if len(coverage):
+        c = coverage[coverage["level"].isin(["overall", "rag"])]
+        lines += ["## Hallucinations found: benchmark alone vs benchmark + mutations", "",
+                  "A question counts as a hallucination found by the mutations if it was fine in the original "
+                  "benchmark but a mutated version made the RAG hallucinate.", "",
+                  df_to_md(c, ["level", "rag", "n_questions", "found_by_benchmark", "found_by_benchmark_plus_mutations",
+                               "extra_found_by_mutations", "benchmark_rate", "union_rate", "fold_increase"]), ""]
+    r = summary[summary["level"] == "rag_method"].copy()
+    r["condition"] = r["condition"].astype(str)
+    wide = r.pivot_table(index=["rag", "method"], columns="condition", values="hallucination_rate").reset_index()
+    wide = wide[["rag", "method"] + [c for c in CONDITIONS if c in wide.columns]]
+    lines += ["## Hallucination rate per RAG and method", "", df_to_md(wide), ""]
+    if len(operators):
+        lines += ["## By operator (hallucination rate; a question with two operators counts for both)", "",
+                  df_to_md(operators), ""]
+    if len(m3):
+        lines += ["## Mutation 3 (user information) by kind and operator", "", df_to_md(m3), ""]
+    (out_dir / "report.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def make_figure(out_dir, summary):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    d = summary[summary["level"] == "rag"]
+    rags = sorted(d["rag"].unique()) + ["ALL"]
+    d = pd.concat([d, summary[summary["level"] == "overall"]])
+    conds = [c for c in CONDITIONS if c in set(d["condition"].astype(str))]
+    fig, ax = plt.subplots(figsize=(1.6 + 1.6 * len(rags), 4))
+    width = 0.8 / len(conds)
+    for i, c in enumerate(conds):
+        vals, err = [], []
+        for r in rags:
+            row = d[(d["rag"] == r) & (d["condition"].astype(str) == c)]
+            if len(row):
+                v = float(row["hallucination_rate"].iloc[0])
+                vals.append(v)
+                err.append([v - float(row["hall_ci_low"].iloc[0]), float(row["hall_ci_high"].iloc[0]) - v])
+            else:
+                vals.append(np.nan)
+                err.append([0, 0])
+        x = np.arange(len(rags)) + i * width - 0.4 + width / 2
+        ax.bar(x, vals, width, yerr=np.array(err).T, capsize=2, label=CONDITION_LABELS[c])
+    ax.set_xticks(np.arange(len(rags)))
+    ax.set_xticklabels(rags)
+    ax.set_ylabel("Hallucination rate")
+    ax.set_title("Benchmark vs Benchmark+ (95% CI)")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_dir / "hallucination_by_condition.png", dpi=160)
+    plt.close(fig)
+
+
+def run_analysis(cfg):
+    df = load_results(cfg)
+    out_dir = ROOT / cfg["evaluation"]["output_dir"] / "_report"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    n_boot, seed = cfg["evaluation"]["bootstrap_samples"], cfg["evaluation"]["seed"]
+    summary, paired = summary_table(df), paired_table(df, n_boot, seed)
+    coverage, operators, m3, labels = coverage_table(df), operator_table(df), m3_table(df), label_table(df)
+    for name, t in (("summary_by_condition", summary), ("paired_vs_baseline", paired), ("coverage", coverage),
+                    ("by_operator", operators), ("m3_breakdown", m3), ("label_distribution", labels)):
+        t.to_csv(out_dir / f"{name}.csv", index=False)
+    write_report(out_dir, summary, paired, coverage, operators, m3, labels, cfg)
+    make_figure(out_dir, summary)
+    return out_dir, summary, paired, coverage

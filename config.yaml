@@ -116,7 +116,7 @@ real_queries:
   general:
     # First user turn only, from two large real-world chat logs. Both need a
     # Hugging Face account that has requested and been granted access on the
-    # dataset's page, and a token in .env as HF_TOKEN (see README section 10).
+    # dataset's page, and a token in .env as HF_TOKEN (see README section 11).
     sources: [wildchat, lmsyschat]
     n_per_source: 2000     # how many conversations to sample from EACH source
     languages: [en]        # keep only these detected/declared languages; null = keep all
@@ -141,3 +141,106 @@ analysis:
   classifier_cv_folds: 5      # cross-validation folds on the training part (reported alongside the held-out score)
   seed: 42
   bootstrap_samples: 2000     # for confidence intervals on each feature's difference
+
+# ------------------------------------------------------------------------
+# Mutations: turn generated benchmark questions into Benchmark+ questions.
+# README section 13 explains every operator and the guarantees behind it.
+# ------------------------------------------------------------------------
+mutation:
+  output_dir: results/mutations   # holds mutation1_length/, mutation2_linguistic/, mutation3_userinfo/, mutation123_combined/
+  seed: 42
+  temperature: 0.3                # LLM randomness when WRITING mutation text (checks always use 0)
+  concurrency: 8                  # items processed in parallel
+  max_retries: 2                  # a mutation that fails its check is redone up to this many extra times, then dropped
+  max_items_per_file: null        # cap items per (rag, method); null = all. (--limit on the command line does the same)
+
+  # Mutation 1: make the prompt LONGER without changing what is asked or the answer.
+  length:
+    n_ops: 2                      # how many different length operators are applied to each question
+    operators:                    # relative sampling weight of each operator; 0 switches one off
+      restate: 1.0                # add a restatement of the question in other words
+      background: 1.0             # add one background sentence taken from the passage (never the answer)
+      instruction: 1.0            # add a content-free answer-style instruction (template, no LLM)
+      appositive: 1.0             # add a short passage-based description after one term in the question
+    verify: true                  # LLM check that the question still asks the same thing and the answer still holds
+
+  # Mutation 2: change HOW the prompt is written (typos, register, person), not what it says.
+  linguistic:
+    n_ops: 2                      # how many different linguistic operators are applied to each question
+    operators:
+      typos: 1.0                  # character-level typos (distance 1) in a few words
+      casual: 1.0                 # contractions, informal wording, lowercase start, dropped punctuation, filler
+      first_person: 0.7           # generic third-person subject -> "I"; else a first-person lead-in sentence
+      politeness: 0.5             # a polite lead-in or closing (lower weight: real queries are polite ~11% of the time)
+      imperative: 1.0             # "What is X?" -> "Tell me what is X." (real queries often start with a verb)
+    typo_rate: 0.15               # fraction of eligible words that get a typo
+    min_typos: 1                  # at least this many typos (if any word is eligible)
+    max_typos: 3                  # at most this many typos
+    min_word_len: 5               # only words at least this long can get a typo
+    protect_entities: false       # true = never put a typo inside a named entity
+    casual_lowercase_prob: 0.8    # casual: chance of lowercasing the first letter
+    casual_drop_punct_prob: 0.7   # casual: chance of dropping the final ? or .
+    casual_elongate_prob: 0.15    # casual: chance of stretching the final punctuation instead ("?" -> "???")
+    casual_filler_prob: 0.4       # casual: chance of a filler opener such as "ok so"
+    verify: true                  # rule-based check that numbers and negations are untouched
+
+  # Mutation 3: add information the USER states: correct (answer stays) or incorrect (answer changes).
+  userinfo:
+    p_correct: 0.5                # fraction of questions that get CORRECT user information (the rest get incorrect)
+    correct_operators:
+      true_premise: 1.0           # the user states a true fact from the passage (not the answer)
+      correct_candidate: 1.0      # the user offers the correct answer and asks to confirm
+    incorrect_operators:
+      false_premise: 1.0          # the user states a false fact that contradicts the passage
+      wrong_candidate: 1.0        # the user offers a wrong answer and asks to confirm
+      unsupported_assumption: 1.0 # the user adds a detail the passage never mentions (the question cannot be settled)
+    verify: true                  # LLM check that each claim is entailed / contradicted / not mentioned as intended
+
+# ------------------------------------------------------------------------
+# Running benchmarks and mutated benchmarks on the RAGs.
+# README section 14 explains the metrics.
+# ------------------------------------------------------------------------
+evaluation:
+  output_dir: results/eval
+  conditions: [baseline, m1, m2, m3, m123]   # baseline = original benchmark; m1/m2/m3 = one mutation; m123 = all three
+  sample_per_file: 500            # questions per (rag, method) evaluated in EVERY condition; null = all. Same questions in all conditions.
+  seed: 42                        # which questions are sampled
+  batch_size: 32                  # questions answered between saves (an interrupted run resumes at the last save)
+  rag_concurrency:                # questions a RAG answers at once
+    lightrag: 8
+    raptor: 4
+    medrag: 8
+  judge_concurrency: 8            # judge calls in parallel
+  judge_llm: null                 # judge with a DIFFERENT model than the one inside the RAGs, e.g. {model: ..., base_url: ..., api_key_env: ...}; null = same as llm:
+  faithfulness_threshold: 1.0     # an answer is UNFAITHFUL if its faithfulness score is below this (1.0 = any unsupported statement)
+  max_context_chars: 60000        # retrieved context given to the faithfulness judge is cut at this length
+  also_source_faithfulness: false # also score faithfulness against ORIGINAL source text only (1 extra judge call per answer)
+  store_contexts: false           # true = keep the retrieved contexts in every result row (large files)
+  bootstrap_samples: 2000         # resamples for confidence intervals in the analysis
+
+# ------------------------------------------------------------------------
+# Profiles: sets of overrides merged on top of everything above.
+# Use with BP_PROFILE=large, or scripts/run_all.py --profile large.
+# ------------------------------------------------------------------------
+profiles:
+  large:
+    # Bigger corpora (so there are enough passages) and thousands of questions per RAG x method.
+    # NOTE: a bigger corpus means a different corpus folder and a NEW index, which costs LLM calls
+    # for LightRAG and RAPTOR. Use `python scripts/run_all.py --profile large --dry-run` to see the plan.
+    corpora:
+      lightrag: {max_docs: 30}
+      raptor: {max_docs: 40}
+      medrag: {max_textbooks: 3}
+    benchmark:
+      output_dir: results/benchmarks_large
+      size: {mode: count, count: 2000}   # change the number here, or with --n on the command line
+      max_questions_per_passage: 4       # several questions per passage, so a modest corpus still gives thousands
+      max_attempts_factor: 4
+      temperature: 0.7                   # >0 so several questions from one passage differ
+      concurrency: 16                    # lower this if DeepSeek returns rate-limit errors
+    mutation:
+      output_dir: results/mutations_large
+    evaluation:
+      output_dir: results/eval_large
+    analysis:
+      output_dir: results/analysis_large

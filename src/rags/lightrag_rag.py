@@ -45,7 +45,7 @@ class LightRAGRag(BaseRAG):
             self._rag = rag
         return self._rag
 
-    # ---- the three functions every RAG provides -------------------------
+    # ---- the functions every RAG provides --------------------------------
     def load_corpus(self):
         docs = []
         for path in sorted(Path(self.corpus_dir).glob("*.txt")):
@@ -68,38 +68,60 @@ class LightRAGRag(BaseRAG):
 
         self._run(_build())
 
+    async def _answer_one(self, rag, question):
+        param = QueryParam(mode=self.query_mode, stream=False, enable_rerank=False)
+        result = await rag.aquery_llm(question, param=param)
+        if result.get("status") != "success":
+            raise RuntimeError(f"LightRAG query failed: {result.get('message')}")
+        data = result.get("data") or {}
+        chunks = [c["content"] for c in data.get("chunks", [])]
+        entities = data.get("entities", [])
+        relations = data.get("relationships", [])
+        # LightRAG also shows the model LLM-written descriptions of graph entities
+        # and relations. They are part of `contexts` (what the model saw) but not
+        # of `source_contexts` (original text only).
+        graph_text = [
+            f"{e.get('entity_name')} ({e.get('entity_type')}): {e.get('description')}"
+            for e in entities
+        ] + [
+            f"{r.get('src_id')} -> {r.get('tgt_id')}: {r.get('description')}"
+            for r in relations
+        ]
+        return {
+            "answer": result["llm_response"]["content"],
+            "contexts": chunks + graph_text,
+            "source_contexts": chunks,
+            "graph_entities": entities,
+            "graph_relationships": relations,
+        }
+
     def answer(self, question):
         async def _answer():
             rag = await self._get_rag()
-            param = QueryParam(
-                mode=self.query_mode, stream=False, enable_rerank=False
-            )
-            result = await rag.aquery_llm(question, param=param)
-            if result.get("status") != "success":
-                raise RuntimeError(f"LightRAG query failed: {result.get('message')}")
-            data = result.get("data") or {}
-            chunks = [c["content"] for c in data.get("chunks", [])]
-            entities = data.get("entities", [])
-            relations = data.get("relationships", [])
-            # LightRAG also shows the model LLM-written descriptions of graph entities
-            # and relations. They are part of `contexts` (what the model saw) but not
-            # of `source_contexts` (original text only).
-            graph_text = [
-                f"{e.get('entity_name')} ({e.get('entity_type')}): {e.get('description')}"
-                for e in entities
-            ] + [
-                f"{r.get('src_id')} -> {r.get('tgt_id')}: {r.get('description')}"
-                for r in relations
-            ]
-            return {
-                "answer": result["llm_response"]["content"],
-                "contexts": chunks + graph_text,
-                "source_contexts": chunks,
-                "graph_entities": entities,
-                "graph_relationships": relations,
-            }
+            return await self._answer_one(rag, question)
 
         return self._run(_answer())
+
+    def answer_batch(self, questions, concurrency=4):
+        """Many questions at once, inside LightRAG's own event loop (its wrapper
+        is not safe to call from several threads)."""
+        if not questions:
+            return []
+
+        async def _all():
+            rag = await self._get_rag()
+            gate = asyncio.Semaphore(max(1, concurrency))
+
+            async def one(q):
+                async with gate:
+                    try:
+                        return await self._answer_one(rag, q)
+                    except Exception as e:
+                        return {"error": f"{type(e).__name__}: {e}"[:300]}
+
+            return await asyncio.gather(*[one(q) for q in questions])
+
+        return self._run(_all())
 
     def close(self):
         if self._rag is not None:
