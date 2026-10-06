@@ -10,17 +10,60 @@ from scipy import stats
 from src.analysis.compare import _benjamini_hochberg
 from src.benchgen.common import read_jsonl
 from src.config import ROOT
-from src.mutate.common import CONDITION_LABELS, CONDITIONS
+from src.mutate.common import (ALL_CONDITIONS as CONDITIONS, CONDITION_LABELS, CONTROL_CONDITIONS,
+                               DERIVED_CONDITIONS, active_conditions)
 
-METRICS = {"hallucinated": "Hallucination rate", "failed": "Failure rate (not correct)"}
+METRICS = {"hallucinated": "Hallucination rate", "failed": "Failure rate (not correct)",
+           "wrong_behavior": "Wrong-behaviour rate (asserted something wrong or adopted a false/unsupported claim)",
+           "hallucinated_strict": "Hallucination rate, strict (user message NOT counted as context)",
+           "unsupported_but_correct": "Unfaithful but judged correct (statements beyond the retrieved text, answer right)",
+           "unfaithful_and_wrong": "Unfaithful AND judged not correct",
+           "retrieval_miss": "Retrieval miss (no original source passage among the retrieved ones)"}
 
 
 # ------------------------------------------------------------------ loading
+UNION_MAX = ["hallucinated", "failed", "unfaithful", "abstained", "wrong_behavior", "hallucinated_strict",
+             "unfaithful_strict", "unsupported_but_correct", "unfaithful_and_wrong", "retrieval_miss"]
+UNION_MIN = ["faithfulness", "faithfulness_strict", "retrieval_hit", "gold_recall"]
+UNION_PARTS = ["baseline", "m1", "m2", "m3"]
+
+
+def add_union_condition(df):
+    """DERIVED condition m_union, per question: failing if it fails in the unchanged benchmark OR in any of the
+    three single-mutation runs (maximum of every bad outcome, minimum of faithfulness / retrieval). Uses only
+    questions that have all four versions. Nothing is evaluated: this is the 'benchmark + added incorrect
+    questions of M1 + M2 + M3' count, without double counting a question that fails under two mutations."""
+    present = set(df["condition"].astype(str))
+    if "m_union" in present or not all(p in present for p in UNION_PARTS):
+        return df
+    key = ["rag", "method", "id"]
+    d = df[df["condition"].astype(str).isin(UNION_PARTS)]
+    d = d[d.groupby(key)["condition"].transform("nunique") == len(UNION_PARTS)]
+    if d.empty:
+        return df
+    d = d.copy()
+    for c in UNION_MAX + UNION_MIN:
+        if c in d.columns:
+            d[c] = pd.to_numeric(d[c], errors="coerce")
+    agg = {c: "max" for c in UNION_MAX if c in d.columns}
+    agg.update({c: "min" for c in UNION_MIN if c in d.columns})
+    u = d.groupby(key).agg(agg).reset_index()
+    base = d[d["condition"].astype(str) == "baseline"].drop_duplicates(key).set_index(key)
+    u = u.merge(base[["expected_behavior"]].reset_index(), on=key, how="left")
+    u["condition"], u["question"], u["kind"], u["response"] = "m_union", "(derived)", None, None
+    u["operators"] = [["union"]] * len(u)
+    u["correct"] = 1.0 - u["failed"]
+    u["label"] = None
+    return pd.concat([df, u], ignore_index=True)
+
+
 def load_results(cfg):
     base = ROOT / cfg["evaluation"]["output_dir"]
+    allowed = set(active_conditions(cfg))
     rows = []
     for f in sorted(base.glob("*/*/*.jsonl")):
-        rows += read_jsonl(f)
+        if f.stem in allowed or f.stem in DERIVED_CONDITIONS:  # results of conditions no longer in use are ignored
+            rows += read_jsonl(f)
     if not rows:
         raise RuntimeError(f"No evaluation results under {base}. Run scripts/evaluate_benchmarks.py first.")
     df = pd.DataFrame(rows)
@@ -28,6 +71,9 @@ def load_results(cfg):
                 "faithfulness", "label", "kind", "operators"):
         if col not in df.columns:
             df[col] = None
+    for col in ("wrong_behavior", "hallucinated_strict", "unfaithful_strict"):
+        if col not in df.columns:
+            df[col] = np.nan
     df["valid"] = df["hallucinated"].notna() & df["rag_error"].isna()
     n_bad = int((~df["valid"]).sum())
     if n_bad:
@@ -35,8 +81,17 @@ def load_results(cfg):
     df = df[df["valid"]].copy()
     df["hallucinated"] = df["hallucinated"].astype(float)
     df["failed"] = 1.0 - df["correct"].astype(float)
+    for col in ("retrieval_hit", "gold_recall"):
+        df[col] = pd.to_numeric(df[col], errors="coerce") if col in df.columns else np.nan
     df["unfaithful"] = df["unfaithful"].astype(float)
+    for col in ("wrong_behavior", "hallucinated_strict", "unfaithful_strict"):
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
     df["abstained"] = df["abstained"].astype(float)
+    df["unsupported_but_correct"] = df["unfaithful"] * (1.0 - df["failed"])
+    df["unfaithful_and_wrong"] = df["unfaithful"] * df["failed"]
+    df["retrieval_miss"] = 1.0 - df["retrieval_hit"]
+    if cfg["evaluation"].get("combined", "derived") == "derived":
+        df = add_union_condition(df)
     df["condition"] = pd.Categorical(df["condition"], [c for c in CONDITIONS if c in set(df["condition"])], ordered=True)
     return df.reset_index(drop=True)
 
@@ -84,6 +139,9 @@ def summary_table(df):
             out.append({"level": level, "rag": rag, "method": method, "condition": cond, "n": n,
                         "hallucination_rate": k / n, "hall_ci_low": lo, "hall_ci_high": hi,
                         "failure_rate": g["failed"].mean(), "unfaithful_rate": g["unfaithful"].mean(),
+                        "unsupported_but_correct_rate": g["unsupported_but_correct"].mean(),
+                        "unfaithful_and_wrong_rate": g["unfaithful_and_wrong"].mean(),
+                        "retrieval_hit_rate": g["retrieval_hit"].mean(),
                         "abstain_rate": g["abstained"].mean(), "mean_faithfulness": g["faithfulness"].astype(float).mean()})
     return pd.DataFrame(out)
 
@@ -129,7 +187,8 @@ def coverage_table(df):
     wide = _wide(df, "hallucinated")
     if "baseline" not in wide:
         return pd.DataFrame()
-    mut = [c for c in wide.columns if c != "baseline"]
+    mut = [c for c in wide.columns if c != "baseline" and c not in CONTROL_CONDITIONS and c not in DERIVED_CONDITIONS]
+    ctrl = [c for c in wide.columns if c in CONTROL_CONDITIONS]
     rows = []
     for level, keys in (("rag_method", ["rag", "method"]), ("rag", ["rag"]), ("overall", [])):
         w = wide.dropna(subset=["baseline"]).reset_index()
@@ -139,7 +198,11 @@ def coverage_table(df):
             base = g["baseline"].to_numpy(float)
             any_mut = g[mut].max(axis=1, skipna=True).fillna(0).to_numpy(float) if mut else np.zeros(len(g))
             union = np.maximum(base, any_mut)
-            rows.append({
+            # controls: the same union logic over the control columns = hallucinations found "for free"
+            any_ctl = g[ctrl].max(axis=1, skipna=True).fillna(0).to_numpy(float) if ctrl else np.zeros(len(g))
+            ctl_union = np.maximum(base, any_ctl)
+            rows.append({"extra_found_by_controls": int(ctl_union.sum() - base.sum()) if ctrl else np.nan,
+                         "extra_found_by_mutations_beyond_controls": int(((union == 1) & (ctl_union == 0)).sum()) if ctrl else np.nan,
                 "level": level, "rag": key[0] if len(key) > 0 else "ALL", "method": key[1] if len(key) > 1 else "ALL",
                 "n_questions": len(g), "found_by_benchmark": int(base.sum()),
                 "found_by_benchmark_plus_mutations": int(union.sum()),
@@ -177,6 +240,22 @@ def m3_table(df):
               .reset_index())
 
 
+def retrieval_table(df):
+    """Does the mutated prompt retrieve worse, and is hallucination tied to a retrieval miss?"""
+    d = df.dropna(subset=["retrieval_hit"])
+    if d.empty:
+        return pd.DataFrame()
+    rows = []
+    for cond, g in d.groupby("condition", observed=True):
+        hit, miss = g[g["retrieval_hit"] == 1.0], g[g["retrieval_hit"] == 0.0]
+        rows.append({"condition": str(cond), "n": len(g), "retrieval_hit_rate": g["retrieval_hit"].mean(),
+                     "mean_gold_recall": g["gold_recall"].mean(),
+                     "hallucination_rate_when_hit": hit["hallucinated"].mean() if len(hit) else np.nan,
+                     "hallucination_rate_when_miss": miss["hallucinated"].mean() if len(miss) else np.nan,
+                     "n_miss": len(miss)})
+    return pd.DataFrame(rows)
+
+
 def label_table(df):
     return (df.groupby(["condition", "expected_behavior", "label"], observed=True)
               .size().rename("n").reset_index())
@@ -197,7 +276,7 @@ def df_to_md(df, cols=None):
     return "\n".join(lines)
 
 
-def write_report(out_dir, summary, paired, coverage, operators, m3, labels, cfg):
+def write_report(out_dir, summary, paired, coverage, operators, m3, labels, cfg, retrieval=None):
     s = summary[summary["level"] == "overall"].copy()
     s["condition"] = s["condition"].astype(str).map(CONDITION_LABELS)
     p = paired[(paired["level"] == "overall") & (paired["metric"] == "hallucinated")].copy()
@@ -207,7 +286,8 @@ def write_report(out_dir, summary, paired, coverage, operators, m3, labels, cfg)
              "All mutated results are compared with the original benchmark question by question (paired).", "",
              "## All RAGs and methods pooled", "",
              df_to_md(s, ["condition", "n", "hallucination_rate", "hall_ci_low", "hall_ci_high", "failure_rate",
-                          "unfaithful_rate", "abstain_rate", "mean_faithfulness"]), "",
+                          "unfaithful_rate", "unsupported_but_correct_rate", "unfaithful_and_wrong_rate",
+                          "retrieval_hit_rate", "abstain_rate", "mean_faithfulness"]), "",
              "## Paired change in hallucination rate vs the original benchmark (pooled)", "",
              "`diff` is condition minus baseline with a 95% paired-bootstrap interval; `newly_failing` = questions the RAG "
              "handled in the benchmark but hallucinated on in the mutated version; `newly_passing` = the reverse; "
@@ -220,7 +300,30 @@ def write_report(out_dir, summary, paired, coverage, operators, m3, labels, cfg)
                   "A question counts as a hallucination found by the mutations if it was fine in the original "
                   "benchmark but a mutated version made the RAG hallucinate.", "",
                   df_to_md(c, ["level", "rag", "n_questions", "found_by_benchmark", "found_by_benchmark_plus_mutations",
-                               "extra_found_by_mutations", "benchmark_rate", "union_rate", "fold_increase"]), ""]
+                               "extra_found_by_mutations", "extra_found_by_controls",
+                               "extra_found_by_mutations_beyond_controls", "benchmark_rate", "union_rate", "fold_increase"]), "",
+                  "`extra_found_by_controls`: the same count for the control conditions (no useful change: a re-run, and "
+                  "filler padding). `extra_found_by_mutations_beyond_controls`: questions that only a mutation exposed, "
+                  "that neither control did. Only this last column is evidence that the mutations themselves help.", ""]
+    ps = paired[(paired["level"] == "overall") & (paired["metric"].isin(
+        ["wrong_behavior", "hallucinated_strict", "unsupported_but_correct", "unfaithful_and_wrong"]))].copy()
+    if len(ps):
+        ps["condition"] = ps["condition"].map(CONDITION_LABELS)
+        lines += ["## The same change measured two other ways (pooled)", "",
+                  "`wrong_behavior`: only answers that assert something wrong or adopt a false / unsupported claim "
+                  "(no faithfulness involved). `hallucinated_strict`: unfaithfulness against the retrieved context "
+                  "ALONE, i.e. a statement repeating what the user said is not accepted as supported. If a mutation "
+                  "shows a change in `hallucinated` but not in these, check it with scripts/audit_hallucinations.py.", "",
+                  df_to_md(ps, ["metric", "condition", "n_pairs", "baseline_rate", "condition_rate", "diff",
+                                "diff_ci_low", "diff_ci_high", "newly_failing", "newly_passing", "q_value"]), ""]
+    if retrieval is not None and len(retrieval):
+        rt = retrieval.copy()
+        rt["condition"] = rt["condition"].map(CONDITION_LABELS)
+        lines += ["## Retrieval: do mutated prompts retrieve the original source passage?", "",
+                  "`retrieval_hit_rate`: share of answers whose retrieved passages include an original source passage "
+                  "of the question. `hallucination_rate_when_miss` vs `_when_hit`: whether hallucination goes with a "
+                  "retrieval miss. If a condition retrieves worse, its extra hallucinations are a retrieval effect "
+                  "(the query got diluted), not the model being fooled.", "", df_to_md(rt), ""]
     r = summary[summary["level"] == "rag_method"].copy()
     r["condition"] = r["condition"].astype(str)
     wide = r.pivot_table(index=["rag", "method"], columns="condition", values="hallucination_rate").reset_index()
@@ -276,9 +379,10 @@ def run_analysis(cfg):
     n_boot, seed = cfg["evaluation"]["bootstrap_samples"], cfg["evaluation"]["seed"]
     summary, paired = summary_table(df), paired_table(df, n_boot, seed)
     coverage, operators, m3, labels = coverage_table(df), operator_table(df), m3_table(df), label_table(df)
-    for name, t in (("summary_by_condition", summary), ("paired_vs_baseline", paired), ("coverage", coverage),
+    retrieval = retrieval_table(df)
+    for name, t in (("retrieval", retrieval), ("summary_by_condition", summary), ("paired_vs_baseline", paired), ("coverage", coverage),
                     ("by_operator", operators), ("m3_breakdown", m3), ("label_distribution", labels)):
         t.to_csv(out_dir / f"{name}.csv", index=False)
-    write_report(out_dir, summary, paired, coverage, operators, m3, labels, cfg)
+    write_report(out_dir, summary, paired, coverage, operators, m3, labels, cfg, retrieval)
     make_figure(out_dir, summary)
     return out_dir, summary, paired, coverage

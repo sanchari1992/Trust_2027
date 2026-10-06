@@ -18,3 +18,5 @@ scipy
 matplotlib
 networkx
 pandas
+nltk
+lemminflect

@@ -112,6 +112,10 @@ benchmark:
 real_queries:
   output_dir: data/real_queries
   spacy_model: en_core_web_sm       # small + fast; en_core_web_trf is more accurate but much slower
+  streaming: true                   # true = read WildChat / LMSYS-Chat over the network without saving them (nothing big on disk,
+                                    #        but EVERY run re-reads the whole dataset). false = download once into the Hugging Face
+                                    #        cache (several GB on disk, check the dataset pages) and reuse it: better if you will run
+                                    #        this more than once (the medical set, a fresh held-out sample, another seed).
 
   general:
     # First user turn only, from two large real-world chat logs. Both need a
@@ -153,6 +157,7 @@ mutation:
   concurrency: 8                  # items processed in parallel
   max_retries: 2                  # a mutation that fails its check is redone up to this many extra times, then dropped
   max_items_per_file: null        # cap items per (rag, method); null = all. (--limit on the command line does the same)
+  generate_combined: false        # true = also create the m123 questions (all three mutations in one prompt); only needed with evaluation.combined: run
 
   # Mutation 1: make the prompt LONGER without changing what is asked or the answer.
   length:
@@ -163,6 +168,12 @@ mutation:
       instruction: 1.0            # add a content-free answer-style instruction (template, no LLM)
       appositive: 1.0             # add a short passage-based description after one term in the question
     verify: true                  # LLM check that the question still asks the same thing and the answer still holds
+    target:                       # how long the mutated prompt should be
+      mode: real                  # none = every question gets n_ops operators (long prompts) | real = each question draws a target length from the word counts of REAL user queries of its domain, and operators are added one at a time until it is reached | range = uniform in `range`
+      range: [25, 80]             # used by mode range
+      cap_words: 100              # mode real: ignore real queries longer than this
+      max_ops: 3                  # at most this many operators per question
+      slack: 1.4                  # an operator that would push the prompt past target x slack is skipped
 
   # Mutation 2: change HOW the prompt is written (typos, register, person), not what it says.
   linguistic:
@@ -173,6 +184,7 @@ mutation:
       first_person: 0.7           # generic third-person subject -> "I"; else a first-person lead-in sentence
       politeness: 0.5             # a polite lead-in or closing (lower weight: real queries are polite ~11% of the time)
       imperative: 1.0             # "What is X?" -> "Tell me what is X." (real queries often start with a verb)
+      synonyms: 1.0               # a few words swapped for WordNet synonyms ("decrease" -> "minify"), checked by a similarity gate
     typo_rate: 0.15               # fraction of eligible words that get a typo
     min_typos: 1                  # at least this many typos (if any word is eligible)
     max_typos: 3                  # at most this many typos
@@ -182,6 +194,11 @@ mutation:
     casual_drop_punct_prob: 0.7   # casual: chance of dropping the final ? or .
     casual_elongate_prob: 0.15    # casual: chance of stretching the final punctuation instead ("?" -> "???")
     casual_filler_prob: 0.4       # casual: chance of a filler opener such as "ok so"
+    synonym_pos: [VERB, ADJ, ADV] # synonyms: which kinds of words may be replaced (add NOUN for nouns: riskier for technical terms)
+    synonym_max_words: 2          # synonyms: at most this many words replaced per question (never two neighbours)
+    synonym_min_similarity: 0.9   # synonyms: keep a swap only if the sentence embedding stays this similar (cosine) to the original
+    synonym_llm_check: true       # synonyms: an LLM approves each swap IN CONTEXT (1 call per question that uses the operator). false = similarity gate only: it lets wrong-sense swaps through
+    synonym_choice: random        # synonyms: which passing synonym to use: random | rarest (like "minify") | commonest
     verify: true                  # rule-based check that numbers and negations are untouched
 
   # Mutation 3: add information the USER states: correct (answer stays) or incorrect (answer changes).
@@ -195,6 +212,7 @@ mutation:
       wrong_candidate: 1.0        # the user offers a wrong answer and asks to confirm
       unsupported_assumption: 1.0 # the user adds a detail the passage never mentions (the question cannot be settled)
     verify: true                  # LLM check that each claim is entailed / contradicted / not mentioned as intended
+    naturalize: true              # an LLM rewrites the added sentence in a natural voice (rule-checked: the claim's words and numbers must survive, else the template sentence is kept); 1 extra call per question
 
 # ------------------------------------------------------------------------
 # Running benchmarks and mutated benchmarks on the RAGs.
@@ -202,7 +220,8 @@ mutation:
 # ------------------------------------------------------------------------
 evaluation:
   output_dir: results/eval
-  conditions: [baseline, m1, m2, m3, m123]   # baseline = original benchmark; m1/m2/m3 = one mutation; m123 = all three
+  conditions: [baseline, m1, m2, m3, c_rerun, c_pad]   # baseline = original benchmark; m1/m2/m3 = the original question with ONLY that mutation; c_rerun, c_pad = CONTROLS (not mutations): the same benchmark question answered again, and the question + off-topic filler as long as the M1 version. Remove the controls to save about 30% of the cost.
+  combined: derived               # derived = the combined "M1+M2+M3" number is computed from the separate m1, m2, m3 runs (a question fails if it fails in the benchmark or in any of the three; nothing extra is run). run = also run m123, the three mutations applied to ONE prompt (needs mutation.generate_combined: true and costs a fifth of the evaluation)
   sample_per_file: 500            # questions per (rag, method) evaluated in EVERY condition; null = all. Same questions in all conditions.
   seed: 42                        # which questions are sampled
   batch_size: 32                  # questions answered between saves (an interrupted run resumes at the last save)
@@ -214,6 +233,8 @@ evaluation:
   judge_llm: null                 # judge with a DIFFERENT model than the one inside the RAGs, e.g. {model: ..., base_url: ..., api_key_env: ...}; null = same as llm:
   faithfulness_threshold: 1.0     # an answer is UNFAITHFUL if its faithfulness score is below this (1.0 = any unsupported statement)
   max_context_chars: 60000        # retrieved context given to the faithfulness judge is cut at this length
+  user_message_as_context: true   # a statement that only repeats what the USER said counts as supported (adopting a false claim is caught by the behaviour label). false = plain faithfulness against the retrieved context
+  also_strict_faithfulness: true  # also keep the plain score (faithfulness_strict, hallucinated_strict): 1 extra judge call per answer, so both versions can be reported
   also_source_faithfulness: false # also score faithfulness against ORIGINAL source text only (1 extra judge call per answer)
   store_contexts: false           # true = keep the retrieved contexts in every result row (large files)
   bootstrap_samples: 2000         # resamples for confidence intervals in the analysis

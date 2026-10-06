@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.benchgen.runner import METHODS
 from src.config import load_config
 from src.evalrun.runner import evaluate
-from src.mutate.common import CONDITIONS
+from src.mutate.common import ALL_CONDITIONS as CONDITIONS, DERIVED_CONDITIONS
 from src.rags.registry import RAG_NAMES, get_rag
 
 
@@ -38,6 +38,8 @@ def main():
     print(f"profile: {cfg['_profile']}")
     conds = args.conditions.split(",") if args.conditions else None
     for c in conds or []:
+        if c in DERIVED_CONDITIONS:
+            sys.exit(f"'{c}' is derived in the analysis from m1, m2 and m3; it is not run on a RAG.")
         if c not in CONDITIONS:
             sys.exit(f"Unknown condition '{c}'. Choose from {CONDITIONS}")
     for rag in RAG_NAMES if args.rag == "all" else [args.rag]:

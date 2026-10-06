@@ -7,6 +7,10 @@ Two sets are built, each as one user turn per row:
               HealthChat-11K (Paruchuri et al., EMNLP Findings 2025), pulled from
               the same two source datasets using HealthChat's own annotation file.
 
+STREAMING vs DOWNLOADING: by default (real_queries.streaming: true in config.yaml) the two big datasets are
+READ over the network without being saved; only your sample is written. Every run re-reads them. Set
+real_queries.streaming: false to download them once into the Hugging Face cache and reuse them.
+
 IMPORTANT - access required before this will run:
   1. Log in at https://huggingface.co and request access on BOTH dataset pages:
        https://huggingface.co/datasets/lmsys/lmsys-chat-1m
@@ -47,6 +51,18 @@ def _check_login():
             "No working Hugging Face login found. Put HF_TOKEN=... in your .env file "
             "(see the notice at the top of this file for how to get one and request access)."
         )
+
+
+def _open(load_dataset, repo_id, cfg):
+    """Open a big dataset either as a stream (nothing saved) or from a one-time local download."""
+    streaming = bool(cfg["real_queries"].get("streaming", True))
+    if streaming:
+        print(f"Streaming {repo_id}: it is read over the network and NOT saved, so only your sample ends up on disk "
+              "(but every run reads the whole dataset again; set real_queries.streaming: false to download it once).")
+    else:
+        print(f"Loading {repo_id}: downloaded ONCE into the Hugging Face cache (several GB; see the dataset page) "
+              "and reused by later runs.")
+    return load_dataset(repo_id, split="train", streaming=streaming)
 
 
 def _first_user_turn(conversation):
@@ -93,8 +109,7 @@ def prepare_general(cfg):
             "wildchat": (WILDCHAT_ID, "conversation", "language"),
             "lmsyschat": (LMSYS_ID, "conversation", "language"),
         }[source]
-        print(f"Streaming {repo_id} (this reads the dataset without downloading all of it)...")
-        ds = load_dataset(repo_id, split="train", streaming=True)
+        ds = _open(load_dataset, repo_id, cfg)
         # Reservoir sampling, so every conversation in the (very long) stream has
         # an equal chance of being picked, without loading the whole dataset.
         reservoir, seen = [], 0
@@ -161,8 +176,8 @@ def prepare_medical(cfg):
         ids = {cid for cid in wanted if cid in by_id.get(source, {})}
         if not ids:
             continue
-        print(f"Streaming {repo_id} to find {len(ids):,} annotated conversation(s)...")
-        ds = load_dataset(repo_id, split="train", streaming=True)
+        print(f"Looking for {len(ids):,} annotated conversation(s) in {repo_id}")
+        ds = _open(load_dataset, repo_id, cfg)
         found = 0
         for row in ds:
             cid = row.get(id_key)

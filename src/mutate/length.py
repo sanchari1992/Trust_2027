@@ -14,10 +14,16 @@ Four operators; each question gets `length.n_ops` different ones:
               we insert "term (description)" ourselves.
               Guarantee: only an insertion next to an existing term, entailed by the passage.
 
+LENGTH TARGET (length.target): by default every question gets n_ops operators, which makes prompts much
+longer than real ones. With target.mode "real" each question draws a target length from the word counts
+of REAL user queries and operators are added one at a time until it is reached (see config.yaml).
+
 Verification: if any LLM-written text was added, one LLM check confirms that the modified
 question asks the same thing, the reference answer still holds, the added statements are
 supported by the passage, and the answer is not revealed. Failures are redone, then dropped.
 """
+import re
+
 from src.mutate.common import weighted_sample
 from src.mutate.prompt import Prompt
 from src.mutate.verify import verify_preserving
@@ -42,7 +48,7 @@ APPOSITIVE_PROMPT = """Passage:
 
 Question: {question}
 
-Choose ONE term (an entity, concept, or technical term) that appears word for word in the question, and write a short description of it (at most 12 words) using ONLY facts from the passage. The description must not contain or hint at the answer to the question and must not contain parentheses.
+Choose ONE term (an entity, concept, or technical term) that appears word for word in the question, and write a short description of it (4 to 12 words) using ONLY facts from the passage. The description must be a plain definition-style noun phrase of what the term is (for example "a public building that lends books"), NOT an instruction, NOT a sentence about a figure, diagram, table, colour or caption, and must not contain or hint at the answer to the question and must not contain parentheses.
 Reply with JSON only: {{"term": "<exact text copied from the question>", "description": "..."}}"""
 
 CONNECTORS = ["In other words:", "Put differently:", "To say it another way:"]
@@ -92,6 +98,11 @@ def op_instruction(prompt, item, ctx, rng):
     return new, {"instruction": text}
 
 
+BAD_DESCRIPTION = re.compile(
+    r"\b(figure|fig\.?|diagram|table|panel|shown|illustrat\w*|depict\w*|red|blue|green|box(es)?|arrow|"
+    r"caption|above|below|left|right|chart|image|photo\w*|fill|see|note|click)\b", re.I)
+
+
 def op_appositive(prompt, item, ctx, rng):
     obj = ctx.ask_json(
         GEN_SYSTEM, APPOSITIVE_PROMPT.format(passage=_passage(item), question=item["question"])
@@ -100,6 +111,10 @@ def op_appositive(prompt, item, ctx, rng):
     desc = str(obj.get("description", "")).strip().rstrip(".")
     if not term or not desc or term not in prompt.core or "(" in desc or ")" in desc:
         return None, {"error": "bad_term_or_description", "term": term}
+    first = desc.split()[0].lower() if desc.split() else ""
+    if not 3 <= len(desc.split()) <= 14 or BAD_DESCRIPTION.search(desc) \
+            or first in {"explain", "describe", "show", "give", "list", "tell", "fill", "see"}:
+        return None, {"error": "description_not_a_definition", "term": term, "description": desc}
     new = prompt.copy()
     new.core = prompt.core.replace(term, f"{term} ({desc})", 1)
     return new, {"term": term, "description": desc}
@@ -113,20 +128,80 @@ OPS = {
 }
 
 
+def _target_words(item, ctx, tc, rng):
+    """Target length (words) for this question, or None for the fixed n_ops behaviour.
+    mode real:  drawn from the word counts of REAL user queries of the same domain (only lengths that
+                are at least 4 words longer than the question and at most cap_words);
+    mode range: uniform in [lo, hi]."""
+    mode = (tc or {}).get("mode", "none")
+    n0 = len(item["question"].split())
+    if mode == "range":
+        lo, hi = tc["range"]
+        return max(rng.randint(int(lo), int(hi)), n0 + 1)
+    if mode == "real":
+        domain = "medical" if item.get("rag") == "medrag" else "general"
+        pool = [n for n in ctx.real_lengths(domain) if n0 + 4 <= n <= tc.get("cap_words", 100)]
+        if not pool:
+            if not ctx.real_lengths(domain):
+                _warn_once(ctx, domain)
+            return None
+        return rng.choice(pool)
+    return None
+
+
+def _warn_once(ctx, domain):
+    if not getattr(ctx, "_warned_len", False):
+        ctx._warned_len = True
+        print(f"  note: length.target.mode is 'real' but there are no real queries for '{domain}' "
+              f"(run scripts/prepare_real_queries.py {domain}); using n_ops instead.")
+
+
+def _build_to_target(item, ctx, mc, rng, target):
+    """Add operators one at a time (in weighted random order) until the prompt reaches `target` words.
+    An operator that would push the prompt beyond target * slack is skipped, so short fixed-size
+    operators (instruction, appositive) can finish the job. Returns (prompt, info, ops, error)."""
+    slack = mc["target"].get("slack", 1.4)
+    order = weighted_sample(rng, mc["operators"], len(mc["operators"]))
+    prompt, info, ops, last_err = Prompt(core=item["question"]), {}, [], None
+    fallback = None  # first operator that alone overshoots: used only if no other one fits
+    for name in order:
+        if len(ops) >= mc["target"].get("max_ops", 3) or len(prompt.render().split()) >= target:
+            break
+        new, detail = OPS[name](prompt, item, ctx, rng)
+        if new is None:
+            last_err = f"{name}:{detail.get('error')}"
+            continue
+        if len(new.render().split()) > target * slack:
+            if not ops and fallback is None:
+                fallback = (name, new, detail)
+            continue
+        prompt, info[name] = new, detail
+        ops.append(name)
+    if not ops and fallback:
+        name, prompt, detail = fallback
+        info[name], ops = detail, [name]
+    return prompt, info, ops, (None if ops else (last_err or "no_operator_applied"))
+
+
 def mutate_length(item, ctx, mc, rng):
     """Returns {"ok": True, "prompt", "operators", "info"} or {"ok": False, "reason"}."""
     last = "no_attempt"
     for attempt in range(ctx.max_retries + 1):
-        ops = weighted_sample(rng, mc["operators"], mc["n_ops"])
-        if not ops:
-            return {"ok": False, "reason": "no_operators_enabled"}
-        prompt, info, failed = Prompt(core=item["question"]), {}, None
-        for name in ops:
-            new, detail = OPS[name](prompt, item, ctx, rng)
-            if new is None:
-                failed = f"{name}:{detail.get('error')}"
-                break
-            prompt, info[name] = new, detail
+        target = _target_words(item, ctx, mc.get("target"), rng)
+        if target:
+            prompt, info, ops, failed = _build_to_target(item, ctx, mc, rng, target)
+            info["target_words"] = target
+        else:
+            ops = weighted_sample(rng, mc["operators"], mc["n_ops"])
+            if not ops:
+                return {"ok": False, "reason": "no_operators_enabled"}
+            prompt, info, failed = Prompt(core=item["question"]), {}, None
+            for name in ops:
+                new, detail = OPS[name](prompt, item, ctx, rng)
+                if new is None:
+                    failed = f"{name}:{detail.get('error')}"
+                    break
+                prompt, info[name] = new, detail
         if failed:
             last = failed
             continue

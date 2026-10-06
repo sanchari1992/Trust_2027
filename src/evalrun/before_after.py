@@ -17,7 +17,7 @@ import pandas as pd
 from src.analysis.features import ALL_NUMERIC_FEATURES, compute_features, load_questions
 from src.config import ROOT
 from src.evalrun.analysis import _levels, df_to_md, paired_bootstrap_diff
-from src.mutate.common import CONDITION_LABELS, CONDITIONS
+from src.mutate.common import ALL_CONDITIONS as CONDITIONS, CONDITION_LABELS, DERIVED_CONDITIONS
 
 OUTCOMES = {"accuracy": "acc", "hallucination_rate": "hallucinated", "unfaithful_rate": "unfaithful",
             "abstain_rate": "abstained"}
@@ -30,7 +30,7 @@ def domain_of(rag):
 
 def add_structural_features(df, cfg):
     """Adds the 25 feature columns to every result row (computed once per distinct question text)."""
-    texts = df["question"].drop_duplicates().tolist()
+    texts = [t for t in df["question"].drop_duplicates().tolist() if t != "(derived)"]
     print(f"Computing structural features for {len(texts):,} distinct questions ...")
     F = compute_features([{"id": i, "question": t} for i, t in enumerate(texts)], "question",
                          cfg["real_queries"]["spacy_model"], show_progress=False)
@@ -77,6 +77,8 @@ def delta_table(df, n_boot, seed):
     for level, keys in (("rag_method", ["rag", "method"]), ("rag", ["rag"]), ("domain", ["domain"]), ("overall", [])):
         for cond in conds:
             for name, w in wides.items():
+                if cond not in w.columns:  # e.g. the derived condition has no structural features (all NaN)
+                    continue
                 sub = w[["baseline", cond]].dropna().reset_index()
                 sub["domain"] = sub["rag"].map(domain_of)
                 parts = sub.groupby(keys) if keys else [((), sub)]
@@ -115,6 +117,7 @@ def _delta(r):
 def write_md(out_dir, df, summary, deltas, real, cfg):
     lab = lambda c: CONDITION_LABELS.get(c, c)  # noqa: E731
     present = [c for c in CONDITIONS if c in set(df["condition"].astype(str))]
+    present_struct = [c for c in present if c not in DERIVED_CONDITIONS]  # derived conditions have no question text
     D = deltas.set_index(["level", "rag", "method", "domain", "condition", "metric"])
 
     def get(level, rag, method, domain, cond, metric):
@@ -166,9 +169,9 @@ def write_md(out_dir, df, summary, deltas, real, cfg):
           "and `lexical_features.py`.", ""]
     for domain, g in df.assign(domain=df["rag"].map(domain_of)).groupby("domain"):
         means = g.groupby(g["condition"].astype(str))[ALL_NUMERIC_FEATURES].mean()
-        cols = (["Real"] if domain in real else []) + [lab(c) for c in present if c in means.index]
+        cols = (["Real"] if domain in real else []) + [lab(c) for c in present_struct if c in means.index]
         t = pd.DataFrame(index=ALL_NUMERIC_FEATURES, columns=cols, dtype=object)
-        for c in present:
+        for c in present_struct:
             if c in means.index:
                 t[lab(c)] = means.loc[c]
         if domain in real:
@@ -178,7 +181,7 @@ def write_md(out_dir, df, summary, deltas, real, cfg):
         rows = []
         for f in ALL_NUMERIC_FEATURES:
             row = {"feature": f}
-            for c in present:
+            for c in present_struct:
                 if c != "baseline":
                     row[f"{lab(c)} vs Benchmark"] = _delta(get("domain", "ALL", "ALL", domain, c, f))
             rows.append(row)
@@ -190,11 +193,17 @@ def write_md(out_dir, df, summary, deltas, real, cfg):
 METHOD_LABEL = {"ragas": "RAGAS", "ares": "ARES", "datamorgana": "DataMorgana"}
 METHOD_SHORT = {"ragas": "RAGAS", "ares": "ARES", "datamorgana": "DM"}  # short headings keep the LaTeX table narrow
 RAG_LABEL = {"lightrag": "LightRAG", "raptor": "RAPTOR", "medrag": "MedRAG", "ALL": "All RAGs"}
-COND_SHORT = {"baseline": "", "m1": " + M1", "m2": " + M2", "m3": " + M3", "m123": " + M1,2,3"}
+COND_SHORT = {"baseline": "", "m1": " + M1", "m2": " + M2", "m3": " + M3", "m123": " + M1,2,3 (one prompt)",
+              "m_union": " + M1,2,3 (combined)",
+              "c_rerun": " + re-run", "c_pad": " + padding"}
 COND_GROUP = {"baseline": "Benchmark", "m1": "+ M1 (length)", "m2": "+ M2 (linguistic)",
-              "m3": "+ M3 (user info)", "m123": "+ M1,2,3"}
+              "m3": "+ M3 (user info)", "m123": "+ M1,2,3 (one prompt)", "m_union": "+ M1,2,3 (combined)",
+              "c_rerun": "Control: re-run", "c_pad": "Control: padding"}
 GRID_METRICS = [  # (key, column, title, only answer items?)
     ("hallucination", "hallucinated", "Hallucination rate", False),
+    ("wrong_behavior", "wrong_behavior", "Wrong-behaviour rate (asserted wrong / adopted a false claim)", False),
+    ("unfaithful_and_wrong", "unfaithful_and_wrong", "Unfaithful and wrong", False),
+    ("retrieval_miss", "retrieval_miss", "Retrieval miss rate (original source passage not retrieved)", False),
     ("accuracy", "acc", "Accuracy", False),
     ("accuracy_answer_items", "acc", "Accuracy on questions whose correct behaviour is to answer", True),
 ]

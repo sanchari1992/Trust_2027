@@ -1,7 +1,8 @@
 """MUTATION 2 - LINGUISTIC. Change HOW the prompt is written, not what it says.
 
-All four operators are rule-based (no LLM), seeded, and applied to each piece of
-the prompt (see prompt.py). Each question gets `linguistic.n_ops` different ones.
+All operators except `synonyms` are rule-based (no LLM calls). All are seeded and act on the
+pieces of the prompt (see prompt.py). Each question gets `linguistic.n_ops` different operators,
+always applied in the fixed order OP_ORDER below (word swaps first, character noise last).
 
   typos         A few words (>= min_word_len letters) get ONE character error each:
                 swap two neighbouring letters, drop a letter, double a letter, or hit a
@@ -20,12 +21,22 @@ the prompt (see prompt.py). Each question gets `linguistic.n_ops` different ones
   imperative    A WH-question is embedded after a request verb: "What is the function of X?" ->
                 "Tell me what is the function of X." The question words and constraints are
                 unchanged; only the sentence now starts with a verb, as real queries often do.
+  synonyms      In the QUESTION itself (not in added sentences) a few verbs / adjectives / adverbs are swapped for WordNet synonyms
+                ("decrease" -> "minify", "show" -> "demonstrate"), correctly inflected. Candidates come
+                from the word's three most frequent senses, with the same part of speech. Never
+                replaced: named entities, numbers, negations, quantifier words, stop words. A swap
+                is KEPT only if the sentence embedding stays close to the original sentence
+                (cosine >= synonym_min_similarity) AND an LLM approves that swap in context (WordNet
+                cannot tell which sense a word has in a sentence; "need" -> "take" is wrong here);
+                "a"/"an" is repaired. This operator is verified, not guaranteed by construction
+                (see README 13.2, P4) and is the only one in mutation 2 that costs an LLM call.
 
 Guarantee for the whole mutation (assumption A3 in README section 13): a competent reader
 maps the new wording to the same constraints. The rule-based check below confirms that
 numbers and negations are identical before and after.
 """
 import re
+import threading
 
 from src.mutate.common import weighted_sample
 from src.mutate.prompt import Prompt
@@ -85,6 +96,7 @@ RULE_POSS = re.compile(rf"\b(?:a|an|the)\s+{SG}'s\b", re.I)
 IMPERATIVE_PREFIXES = ["Explain", "Explain", "Tell me"]  # mostly first-person-free: first_person has its own operator
 WH_START = re.compile(r"^(?:what|who|whom|whose|which|when|where|why|how)\b", re.I)
 
+WN_POS = {"VERB": "v", "ADJ": "a", "ADV": "r", "NOUN": "n"}  # spaCy POS -> WordNet POS letter
 FP_LEADS = [
     "I'm trying to understand something.", "I have a quick question.",
     "I was wondering about something.", "I need some help with this.", "I'm curious about this.",
@@ -136,7 +148,7 @@ def _sub_table(text, table, rng, prob=1.0):
 
 
 def _entity_spans(text, ctx):
-    return [(e.start_char, e.end_char) for e in ctx.nlp(text).ents]
+    return [(e.start_char, e.end_char) for e in ctx.parse(text).ents]
 
 
 def _keeps_capital(text, ctx):
@@ -291,8 +303,183 @@ def op_politeness(prompt, ctx, mc, rng):
     return new, {"mode": "wrapper", "changes": [text]}
 
 
+# ----------------------------------------------------------------- synonyms
+def _wordnet():
+    """WordNet through nltk (data is downloaded on first use) + lemminflect for inflection."""
+    try:
+        from nltk.corpus import wordnet as wn
+        import lemminflect  # noqa: F401
+    except ImportError as e:
+        raise RuntimeError(f"The 'synonyms' operator needs nltk and lemminflect: pip install nltk lemminflect ({e})")
+    try:
+        wn.ensure_loaded()
+    except LookupError:
+        import nltk
+
+        nltk.download("wordnet", quiet=True)
+        try:
+            wn.ensure_loaded()
+        except LookupError:
+            raise RuntimeError("WordNet data is missing and could not be downloaded. "
+                               "Run once with internet access: python -m nltk.downloader wordnet")
+    return wn
+
+
+def _inflect(name, token):
+    from lemminflect import getInflection
+
+    forms = getInflection(name, tag=token.tag_)
+    return forms[0] if forms else None
+
+
+# NLTK's WordNet reads its data files through a shared file handle (seek + read), which is NOT
+# thread-safe: several worker threads calling it at once randomly raise AssertionError. All
+# WordNet and inflection lookups therefore go through this lock (each takes well under a millisecond).
+_WN_LOCK = threading.Lock()
+
+
+def _synonym_candidates(token, wn):
+    """[(surface form in the right inflection, WordNet frequency, base form)] for one spaCy token."""
+    lemma = token.lemma_.lower()
+    counts = {}
+    with _WN_LOCK:
+        for syn in wn.synsets(lemma, pos=WN_POS[token.pos_])[:3]:  # most frequent senses first
+            for l in syn.lemmas():
+                name = l.name()
+                if not name.isalpha():  # skips multi-word ("cut_down") and hyphenated entries
+                    continue
+                name = name.lower()
+                if name != lemma:
+                    counts[name] = counts.get(name, 0) + l.count()
+        forms = []
+        for name, c in counts.items():
+            form = _inflect(name, token)
+            if form and form.lower() != token.text.lower():
+                forms.append((form, c, name))
+    return forms
+
+
+def _synonym_eligible(token, doc, allowed_pos):
+    if token.pos_ not in allowed_pos or not token.is_alpha or len(token.text) < 4:
+        return False
+    # text in parentheses is mutation 1's appositive (passage-derived, separately verified): leave it alone
+    if any(m.start() <= token.idx < m.end() for m in re.finditer(r"\([^)]*\)", doc.text)):
+        return False
+    if token.is_stop or token.like_num or token.ent_type_ or token.text.isupper():
+        return False
+    if token.is_title and token.i > 0:  # a capitalised word inside a sentence is usually a name
+        return False
+    if token.text.lower() in PROTECTED_WORDS or NEGATION_RE.fullmatch(token.text):
+        return False
+    return not ((token.i > 0 and doc[token.i - 1].text == "-") or
+                (token.i + 1 < len(doc) and doc[token.i + 1].text == "-"))
+
+
+SYN_CHECK_SYSTEM = "You are a careful verifier. Reply with JSON only, no other text."
+SYN_CHECK_PROMPT = """Sentence before: {before}
+Sentence after: {after}
+
+In the sentence after, some words were replaced by synonyms. For each replacement below, decide whether the new word has the same meaning as the old word IN THIS SENTENCE, so that the sentence still says or asks exactly the same thing and reads naturally.
+{listing}
+Reply with JSON only, one true or false per replacement, in order: {{"ok": [true, false]}}"""
+
+
+def _apply_swaps(piece, doc, swaps):
+    """Apply [(token, new_word)] to a sentence, right to left, keeping a/an grammatical."""
+    out = piece
+    for t, word in sorted(swaps, key=lambda x: -x[0].idx):
+        out = out[: t.idx] + word + out[t.idx + len(t.text):]
+        if t.i > 0 and doc[t.i - 1].text.lower() in ("a", "an"):
+            prev = doc[t.i - 1]
+            need = "an" if word[:1].lower() in "aeiou" else "a"
+            if prev.text.lower() != need:
+                need = need.capitalize() if prev.text[:1].isupper() else need
+                out = out[: prev.idx] + need + out[prev.idx + len(prev.text):]
+    return out
+
+
+def _approved_by_llm(ctx, before, doc, swaps):
+    """One LLM call: which of these in-context swaps keep the meaning? Fails closed (none approved)."""
+    after = _apply_swaps(before, doc, swaps)
+    listing = "\n".join(f'{i}. "{t.text}" -> "{w}"' for i, (t, w) in enumerate(swaps, 1))
+    obj = ctx.ask_json(SYN_CHECK_SYSTEM, SYN_CHECK_PROMPT.format(before=before, after=after, listing=listing),
+                       max_tokens=100, temperature=0)
+    ok = (obj or {}).get("ok")
+    if not isinstance(ok, list) or len(ok) != len(swaps):
+        return [False] * len(swaps)
+    return [v is True or (isinstance(v, str) and v.strip().lower() == "true") for v in ok]
+
+
+def op_synonyms(prompt, ctx, mc, rng):
+    wn = _wordnet()
+    allowed = set(mc["synonym_pos"])
+    # Only the QUESTION itself is touched: not lead-ins added by other operators, and never the
+    # sentences mutation 1 or 3 added (a user claim must keep exactly the wording that was verified).
+    pieces = [prompt.core]
+    docs = [ctx.parse(p) for p in pieces]
+    cands = []
+    for pi, doc in enumerate(docs):
+        for t in doc:
+            if _synonym_eligible(t, doc, allowed):
+                forms = _synonym_candidates(t, wn)
+                if forms:
+                    cands.append((pi, t, forms))
+    if not cands:
+        return prompt, {"mode": "no_candidates", "synonyms": []}
+    rng.shuffle(cands)
+    chosen = []
+    for pi, t, forms in cands:
+        if len(chosen) >= mc["synonym_max_words"]:
+            break
+        if any(pj == pi and abs(u.i - t.i) <= 1 for pj, u, _ in chosen):  # never two neighbouring words
+            continue
+        chosen.append((pi, t, forms))
+
+    # step 1: per word, keep the candidates whose single swap stays close to the original sentence
+    picked = {}  # piece index -> [(token, word, similarity)]
+    for pi, t, forms in chosen:
+        trials = []
+        for form, count, base in forms:
+            word = form[:1].upper() + form[1:] if t.text[:1].isupper() else form
+            trials.append((word, count, _apply_swaps(pieces[pi], docs[pi], [(t, word)])))
+        sims = ctx.similarity(pieces[pi], [tr[2] for tr in trials])  # always against the ORIGINAL sentence
+        ok = [(tr, sim) for tr, sim in zip(trials, sims) if sim >= mc["synonym_min_similarity"]]
+        if not ok:
+            continue
+        if mc["synonym_choice"] == "rarest":
+            (word, count, _), sim = min(ok, key=lambda x: x[0][1])
+        elif mc["synonym_choice"] == "commonest":
+            (word, count, _), sim = max(ok, key=lambda x: x[0][1])
+        else:
+            (word, count, _), sim = rng.choice(ok)
+        picked.setdefault(pi, []).append((t, word, float(sim)))
+
+    # step 2: an LLM approves each swap IN CONTEXT (WordNet cannot tell which sense a word has here)
+    new_pieces, made, rejected = list(pieces), [], []
+    for pi, swaps in picked.items():
+        pairs = [(t, w) for t, w, _ in swaps]
+        approved = _approved_by_llm(ctx, pieces[pi], docs[pi], pairs) if mc["synonym_llm_check"] else [True] * len(pairs)
+        keep = [(t, w) for (t, w), good in zip(pairs, approved) if good]
+        rejected += [{"from": t.text, "to": w} for (t, w), good in zip(pairs, approved) if not good]
+        if keep:
+            new_pieces[pi] = _apply_swaps(pieces[pi], docs[pi], keep)
+            made += [{"from": t.text, "to": w, "pos": t.pos_, "similarity": round(sim, 3)}
+                     for (t, w, sim), good in zip(swaps, approved) if good]
+    if not made:
+        return prompt, {"mode": "no_swap_passed_the_checks", "synonyms": [], "rejected_by_llm": rejected}
+    new = prompt.copy()
+    new.core = new_pieces[0]
+    return new, {"mode": "wordnet", "synonyms": made, "rejected_by_llm": rejected}
+
+
+def check_resources(mc):
+    """Fail early (before any LLM call) if an enabled operator needs something that is missing."""
+    if float(mc["operators"].get("synonyms", 0)) > 0:
+        _wordnet()
+
+
 OPS = {"typos": op_typos, "casual": op_casual, "first_person": op_first_person,
-       "politeness": op_politeness, "imperative": op_imperative}
+       "politeness": op_politeness, "imperative": op_imperative, "synonyms": op_synonyms}
 
 
 # ----------------------------------------------------------------- check + driver
@@ -308,25 +495,41 @@ def check_surface(before, after):
     return problems
 
 
-def mutate_linguistic(prompt0, ctx, mc, rng, fixed_ops=None):
-    """Returns {"ok": True, "prompt", "operators", "info"} or {"ok": False, "reason"}.
-    fixed_ops: use these operators (in this order) when possible - the combined
-    condition reuses the operators chosen for the standalone Mutation 2."""
-    before = prompt0.render()
-    order = list(fixed_ops) if fixed_ops else weighted_sample(rng, mc["operators"], mc["n_ops"])
-    if not order:
-        return {"ok": False, "reason": "no_operators_enabled"}
-    spare = [o for o in weighted_sample(rng, mc["operators"], len(OPS)) if o not in order]
-    applied, info, prompt = [], {}, prompt0
-    queue = list(order) + spare
-    for name in queue:
-        if len(applied) >= len(order):
-            break
+# Operators are always APPLIED in this order, whichever were sampled: word-level swaps first (so
+# they only ever see the question's own words), structure rewrites next, character noise last.
+OP_ORDER = ["synonyms", "first_person", "imperative", "casual", "typos", "politeness"]
+
+
+def _apply_ops(prompt0, names, ctx, mc, rng):
+    prompt, info, applied, noops = prompt0, {}, [], []
+    for name in sorted(names, key=OP_ORDER.index):
         new, detail = OPS[name](prompt, ctx, mc, rng)
-        if new.render() == prompt.render():  # a no-op (e.g. already first person): try the next operator
+        if new.render() == prompt.render():  # a no-op (e.g. first-person on text that is already first person)
+            noops.append(name)
             continue
         prompt, info[name] = new, detail
         applied.append(name)
+    return prompt, info, applied, noops
+
+
+def mutate_linguistic(prompt0, ctx, mc, rng, fixed_ops=None):
+    """Returns {"ok": True, "prompt", "operators", "info"} or {"ok": False, "reason"}.
+    fixed_ops: use these operators when possible - the combined condition reuses the operators
+    chosen for the standalone Mutation 2. An operator that changes nothing is replaced by an
+    unused one; the chosen set is then applied again from scratch, in the fixed order above."""
+    before = prompt0.render()
+    names = list(fixed_ops) if fixed_ops else weighted_sample(rng, mc["operators"], mc["n_ops"])
+    if not names:
+        return {"ok": False, "reason": "no_operators_enabled"}
+    wanted = len(names)
+    spare = [o for o in weighted_sample(rng, mc["operators"], len(OPS)) if o not in names]
+    while True:
+        prompt, info, applied, noops = _apply_ops(prompt0, names, ctx, mc, rng)
+        if not noops or not spare:
+            break
+        names = [n for n in names if n not in noops]
+        while spare and len(names) < wanted:
+            names.append(spare.pop(0))
     problems = check_surface(before, prompt.render()) if mc["verify"] else (
         [] if prompt.render() != before else ["no_change"]
     )

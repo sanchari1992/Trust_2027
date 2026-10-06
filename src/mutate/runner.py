@@ -19,7 +19,7 @@ from src.config import ROOT, corpus_tag
 from src.llm import USAGE, get_chat_func
 from src.mutate.common import MUTATION_DIRS, MutCtx, benchmark_file, mutation_file
 from src.mutate.length import mutate_length
-from src.mutate.linguistic import mutate_linguistic
+from src.mutate.linguistic import check_resources, mutate_linguistic
 from src.mutate.prompt import Prompt, merge
 from src.mutate.userinfo import mutate_userinfo
 
@@ -70,7 +70,9 @@ def mutate_item(item, ctx, cfg):
     else:
         rejected["m3"] = r3["reason"]
 
-    if r1["ok"] and r3["ok"]:
+    if not mc.get("generate_combined", False):
+        pass  # the combined condition is derived in the analysis (evaluation.combined: derived)
+    elif r1["ok"] and r3["ok"]:
         merged = merge(r1["prompt"], p3)
         r123 = mutate_linguistic(merged, ctx, mc["linguistic"], rng("m123"),
                                  fixed_ops=r2["operators"] if r2["ok"] else None)
@@ -117,11 +119,12 @@ def run(rag, method, cfg, limit=None, fresh=False, dry_run=False):
     print(f"\n=== mutate {rag} / {method} ===")
     print(f"{len(items):,} benchmark questions from {src}")
     print(f"LLM calls: about {CALLS_PER_ITEM} per question, so roughly {len(items) * CALLS_PER_ITEM:,} in total "
-          "(mutation 2 uses none).")
+          "(mutation 2 only for the synonym check).")
     if dry_run:
         print("(dry run: nothing was generated)")
         return None
 
+    check_resources(mc["linguistic"])  # e.g. WordNet for the synonyms operator: fail now, not after 5 errors
     current = settings_hash({
         "seed": mc["seed"], "temperature": mc["temperature"], "max_retries": mc["max_retries"],
         "length": mc["length"], "linguistic": mc["linguistic"], "userinfo": mc["userinfo"],

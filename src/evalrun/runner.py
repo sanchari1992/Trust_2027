@@ -9,6 +9,7 @@ For one (RAG, method) the SAME sampled questions are used in every condition:
 Only questions that survived every mutation's check are eligible, so conditions are
 compared item by item. Results: <evaluation.output_dir>/<rag>_<tag>/<method>/<condition>.jsonl
 """
+import json
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -16,10 +17,11 @@ from concurrent.futures import ThreadPoolExecutor
 from src.benchgen.common import append_jsonl, read_jsonl
 from src.config import ROOT, corpus_tag, index_dir
 from src.evalrun.judge import Judge
-from src.mutate.common import CONDITION_LABELS, condition_file
+from src.evalrun.controls import control_rows, retrieval_scores
+from src.mutate.common import CONDITION_LABELS, CONTROL_CONDITIONS, active_conditions, condition_file
 from src.rags.registry import get_rag
 
-CALLS_PER_ANSWER = 5  # rough: ~2 for the RAG, ~3 for the judge (labels, statements, verdicts)
+CALLS_PER_ANSWER = 6  # rough: ~2 for the RAG, ~4 for the judge (label, statements, verdicts with and without the user message)
 
 
 def eval_file(cfg, cond, rag, method):
@@ -36,12 +38,17 @@ def select_questions(cfg, rag, method, conds, limit=None):
     """-> (ids, {cond: {id: row}}, usable_conditions). Only ids valid in EVERY usable condition."""
     ev = cfg["evaluation"]
     rows = {}
-    for c in conds:
+    for c in [c for c in conds if c not in CONTROL_CONDITIONS]:
         f = condition_file(cfg, c, rag, method)
         rows[c] = {r["id"]: r for r in read_jsonl(f)} if f.exists() else {}
     if not rows.get("baseline"):
         return None, None, None
-    usable = [c for c in conds if rows[c]]
+    for c in [c for c in conds if c in CONTROL_CONDITIONS]:
+        if c == "c_pad" and "m1" not in rows:  # the padding control is sized from the M1 version
+            rows["m1"] = {r["id"]: r for r in read_jsonl(condition_file(cfg, "m1", rag, method))} \
+                if condition_file(cfg, "m1", rag, method).exists() else {}
+        rows[c] = control_rows(c, rows, cfg["evaluation"]["seed"])
+    usable = [c for c in conds if rows.get(c)]
     for c in conds:
         if c not in usable:
             print(f"  note: no questions for condition '{c}' ({rag}/{method}); skipping it.")
@@ -56,7 +63,7 @@ def select_questions(cfg, rag, method, conds, limit=None):
 
 def evaluate(rag_name, method, cfg, rag_obj=None, conds=None, limit=None, fresh=False, dry_run=False):
     ev = cfg["evaluation"]
-    conds = conds or ev["conditions"]
+    conds = conds or active_conditions(cfg)
     ids, rows, usable = select_questions(cfg, rag_name, method, conds, limit)
     print(f"\n=== evaluate {rag_name} / {method} ===")
     if ids is None:
@@ -80,7 +87,18 @@ def evaluate(rag_name, method, cfg, rag_obj=None, conds=None, limit=None, fresh=
         out.parent.mkdir(parents=True, exist_ok=True)
         if fresh:
             out.unlink(missing_ok=True)
-        done = {r["id"] for r in read_jsonl(out)}
+        existing = read_jsonl(out)
+        current = rows[cond]
+        keep = [r for r in existing if r["id"] in current
+                and r.get("question") == current[r["id"]]["question"]
+                and r.get("reference_answer") == current[r["id"]]["answer"]]
+        if len(keep) < len(existing):
+            print(f"  dropped {len(existing) - len(keep)} stored result(s) whose question or reference "
+                  f"answer has changed since they were evaluated; they will be redone")
+            tmp = out.with_suffix(".tmp")
+            tmp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in keep), encoding="utf-8")
+            tmp.replace(out)
+        done = {r["id"] for r in keep}
         todo = [i for i in ids if i not in done]
         print(f"[{CONDITION_LABELS[cond]}] {len(done)} done, {len(todo)} to do")
         t0 = time.time()
@@ -111,6 +129,8 @@ def evaluate(rag_name, method, cfg, rag_obj=None, conds=None, limit=None, fresh=
                     "response": res.get("answer"),
                     "n_contexts": len(res.get("contexts") or []),
                     "n_source_contexts": len(res.get("source_contexts") or []),
+                    **dict(zip(("gold_recall", "retrieval_hit"), retrieval_scores(
+                        row.get("contexts"), res.get("source_contexts") or res.get("contexts")))),
                     **j,
                 }
                 if ev["store_contexts"]:

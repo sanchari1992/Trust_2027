@@ -12,6 +12,15 @@
      behaviour "abstain"         the user added a detail the source never mentions; the answer
                                  should not accept it as established.
 
+USER MESSAGE AS CONTEXT (evaluation.user_message_as_context, default true). A system that repeats what the
+user said ("as you mentioned, X") makes a statement the retrieved context may not contain, and plain
+faithfulness would call that a hallucination even when the repetition is harmless. With this switch the
+user's message is added to the context ONLY to support statements that repeat what the user said; adopting
+a false claim is caught separately by the behaviour label ("followed_false_claim", "accepted_detail").
+The strict score (retrieved context only) is always kept as faithfulness_strict / unfaithful_strict /
+hallucinated_strict (evaluation.also_strict_faithfulness, one extra judge call per answer), so both
+versions can be reported.
+
 Outcome definitions (per answer):
   unfaithful    F < evaluation.faithfulness_threshold (some statement is not supported by the context)
   correct       the label is not a FAILURE label (below). Declining to answer an answerable
@@ -143,15 +152,32 @@ class Judge:
             prompt += f"\n\nIMPORTANT: there are exactly {len(statements)} statements, so give exactly {len(statements)} verdicts."
         return (found + ["no"] * len(statements))[: len(statements)], True  # missing verdicts count as unsupported
 
-    def faithfulness(self, question, answer, contexts):
+    def faithfulness(self, question, answer, contexts, user_message=None, strict=False):
+        """Faithfulness against the retrieved contexts. If user_message is given it is added to the context,
+        marked so that it can only support statements that repeat what the user said.
+        strict=True also returns the score against the retrieved contexts alone ("strict")."""
         statements = self._statements(question, answer)
         if not statements:
-            return {"faithfulness": 1.0, "n_statements": 0, "n_supported": 0, "parse_issue": False}
+            r = {"faithfulness": 1.0, "n_statements": 0, "n_supported": 0, "parse_issue": False}
+            return {**r, "faithfulness_strict": 1.0} if strict else r
         context = "\n\n".join(contexts)[: self.ev["max_context_chars"]] or "(no context was retrieved)"
-        verdicts, issue = self._verdicts(context, statements)
+        with_user = context
+        if user_message:
+            with_user = (context + "\n\n[Message written by the user. A statement that merely repeats or "
+                         "restates what the user said here counts as supported. Do not use this message to "
+                         "support any other statement.]\n" + user_message)
+        verdicts, issue = self._verdicts(with_user, statements)
         supported = sum(v == "yes" for v in verdicts)
-        return {"faithfulness": supported / len(statements), "n_statements": len(statements),
-                "n_supported": supported, "parse_issue": issue}
+        out = {"faithfulness": supported / len(statements), "n_statements": len(statements),
+               "n_supported": supported, "parse_issue": issue}
+        if strict:
+            if user_message:
+                v2, issue2 = self._verdicts(context, statements)
+                out["faithfulness_strict"] = sum(v == "yes" for v in v2) / len(statements)
+                out["parse_issue"] = issue or issue2
+            else:
+                out["faithfulness_strict"] = out["faithfulness"]
+        return out
 
     # ---------------------------------------------------------------- correctness
     def label(self, row, response):
@@ -179,6 +205,8 @@ class Judge:
         contexts = result.get("contexts") or []
         out = {"label": None, "correct": None, "faithfulness": None, "n_statements": None,
                "n_supported": None, "unfaithful": None, "hallucinated": None, "abstained": None,
+               "faithfulness_strict": None, "unfaithful_strict": None, "hallucinated_strict": None,
+               "wrong_behavior": None,
                "judge_error": False,
                "faithfulness_parse_issue": False}
         label = self.label(row, response) if response.strip() else "abstained" if behavior != "abstain" else "flagged"
@@ -188,14 +216,23 @@ class Judge:
         out["label"] = label
         out["correct"] = label not in FAILURE_LABELS[behavior]
         if label in SKIP_FAITHFULNESS or not response.strip():
-            faith = {"faithfulness": 1.0, "n_statements": 0, "n_supported": 0, "parse_issue": False}
+            faith = {"faithfulness": 1.0, "faithfulness_strict": 1.0, "n_statements": 0, "n_supported": 0,
+                     "parse_issue": False}
         else:
-            faith = self.faithfulness(row["question"], response, contexts)
-        out.update(faithfulness=faith["faithfulness"], n_statements=faith["n_statements"],
-                   n_supported=faith["n_supported"], faithfulness_parse_issue=faith["parse_issue"])
-        out["unfaithful"] = faith["faithfulness"] < self.ev["faithfulness_threshold"]
+            user_msg = row["question"] if self.ev.get("user_message_as_context", True) else None
+            faith = self.faithfulness(row["question"], response, contexts, user_message=user_msg,
+                                      strict=bool(self.ev.get("also_strict_faithfulness", True)))
+            faith.setdefault("faithfulness_strict", faith["faithfulness"])
+        thr = self.ev["faithfulness_threshold"]
+        out.update(faithfulness=faith["faithfulness"], faithfulness_strict=faith["faithfulness_strict"],
+                   n_statements=faith["n_statements"], n_supported=faith["n_supported"],
+                   faithfulness_parse_issue=faith["parse_issue"])
+        out["unfaithful"] = faith["faithfulness"] < thr
+        out["unfaithful_strict"] = faith["faithfulness_strict"] < thr
         out["abstained"] = label == "abstained"
-        out["hallucinated"] = bool(out["unfaithful"] or label in HALLUCINATION_LABELS)
+        out["wrong_behavior"] = label in HALLUCINATION_LABELS
+        out["hallucinated"] = bool(out["unfaithful"] or out["wrong_behavior"])
+        out["hallucinated_strict"] = bool(out["unfaithful_strict"] or out["wrong_behavior"])
         if self.ev["also_source_faithfulness"]:
             src = result.get("source_contexts") or []
             if label in SKIP_FAITHFULNESS or not response.strip():

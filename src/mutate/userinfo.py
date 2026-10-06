@@ -78,12 +78,23 @@ Reply with JSON only: {{"assumption": "..."}}"""
 PREMISE_LEADS = [
     "I read somewhere that {c}.", "My understanding is that {c}.",
     "I've heard that {c}.", "From what I know, {c}.",
+    "I was told that {c}.", "As far as I remember, {c}.", "A friend mentioned that {c}.",
+    "I'm pretty sure that {c}.", "Correct me if I'm wrong, but {c}.", "I think {c}.",
 ]
 CANDIDATE_TAILS = [
     "I think that {c}. Is that right?", "My guess is that {c}. Am I right?",
-    "Would it be correct that {c}?",
+    "Would it be correct that {c}?", "Is it true that {c}?", "I'd say {c}, no?",
+    "Someone told me {c}. Can you confirm?", "Isn't it the case that {c}?",
 ]
-ASSUMPTION_LEADS = ["Note that {c}.", "For context, I should say that {c}.", "Keep in mind that {c}."]
+ASSUMPTION_LEADS = [
+    "Note that {c}.", "For context, I should say that {c}.", "Keep in mind that {c}.",
+    "Just so you know, {c}.", "I should add that {c}.", "Assume that {c}.",
+]
+
+NATURALIZE_PROMPT = """Rewrite the user's sentence below so that it sounds like something a real person typed to a chatbot: natural, varied wording, no stiff template phrases. Keep the claim it states EXACTLY the same in meaning, and keep every name, number and technical term unchanged. {tail_rule}Do not add any new fact. Use at most {max_words} words.
+
+Sentence: {sentence}
+Reply with JSON only: {{"text": "..."}}"""
 
 ABSTAIN_ANSWER = (
     "The provided information does not mention this detail, so the question cannot be "
@@ -113,6 +124,33 @@ def _gen(ctx, template, item, key, **extra):
 
 def _answer_claim(question, candidate):
     return f'The answer to the question "{question}" is that {candidate}.'
+
+
+def _tokens(s):
+    import re
+
+    return set(re.findall(r"[a-z0-9]+", str(s).lower()))
+
+
+def naturalize(ctx, made, sentence, is_candidate):
+    """Ask the LLM for a more natural wording of the added sentence. Accepted only if (rule-based):
+    every number of the claim is still there, at least 80% of the claim's words are still there, a
+    candidate ('is that right?') still ends as a question, and it is not much longer. Else the template
+    sentence is kept. Returns (text, naturalized?)."""
+    claim = made["claim"]
+    max_words = max(25, 3 * len(claim.split()))
+    obj = ctx.ask_json(GEN_SYSTEM, NATURALIZE_PROMPT.format(
+        sentence=sentence, max_words=max_words,
+        tail_rule="It must still ask the user's question (to confirm the guess) and end with a question mark. " if is_candidate else ""))
+    text = " ".join(str((obj or {}).get("text", "")).split())
+    if not text or len(text.split()) > max_words:
+        return sentence, False
+    ct, tt = _tokens(claim), _tokens(text)
+    if not ct or len(ct & tt) / len(ct) < 0.8 or any(t.isdigit() and t not in tt for t in ct):
+        return sentence, False
+    if is_candidate and "?" not in text:
+        return sentence, False
+    return text, True
 
 
 def _make(op, ctx, item, rng):
@@ -192,6 +230,11 @@ def mutate_userinfo(item, ctx, mc, rng):
                     last = f"{op}:correction_not_supported"
                     continue
             made["info"]["verification"] = raw
+        if mc.get("naturalize"):
+            key = "post" if made["post"] else "pre"
+            text, ok = naturalize(ctx, made, made[key][0], is_candidate=op.endswith("candidate"))
+            made[key] = [text]
+            made["info"]["naturalized"] = ok
         return {
             "ok": True, "kind": kind, "operator": op, "pre": made["pre"], "post": made["post"],
             "answer": made["answer"], "behavior": made["behavior"],
