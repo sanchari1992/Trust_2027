@@ -2,6 +2,20 @@
 
     python scripts/summary_counts.py
 
+TABLE 1, "Benchmark+ as a bigger benchmark" (read this first): Benchmark+ contains the original questions AND their
+mutated versions, so the number of questions grows:
+    Benchmark                      N questions                 (the originals)
+    Benchmark + M1                 2N   (originals + their M1 versions)
+    Benchmark + M2                 2N   (originals + their M2 versions)
+    Benchmark + M3                 2N   (originals + their M3 versions)
+    Benchmark + M1 + M2 + M3       4N   (originals + all three mutated versions)
+(plus, for reference, "Benchmark + same question again" and "Benchmark + off-topic filler", also 2N.)
+Counts are sums over all questions in the set; rates are counts / questions. Only questions that have every version
+are used, so N is the same everywhere. The 95% interval resamples ORIGINAL questions (each with all its versions),
+because a question and its mutated versions are not independent tests. `added_questions` /
+`hallucinated_in_added` count only the mutated rows that were added to the benchmark.
+
+The tables after it compare each condition with the unchanged question, one question at a time:
 Every mutated condition is the ORIGINAL benchmark question with ONLY that mutation applied:
     Benchmark + M1 only | + M2 only | + M3 only     (one mutation each, on the original question)
     Benchmark + M1/M2/M3 combined (any separate run)   DERIVED, nothing extra is run: a question counts as failing
@@ -84,6 +98,51 @@ def table(df, by):
     return t.sort_values(by + ["_o"]).drop(columns=["_c", "_o"]).reset_index(drop=True)
 
 
+BPLUS_SETS = [  # (label, conditions in the set, number of added versions)
+    ("Benchmark", ["baseline"]),
+    ("Benchmark + M1", ["baseline", "m1"]),
+    ("Benchmark + M2", ["baseline", "m2"]),
+    ("Benchmark + M3", ["baseline", "m3"]),
+    ("Benchmark + M1 + M2 + M3", ["baseline", "m1", "m2", "m3"]),
+    ("Reference: Benchmark + same question again", ["baseline", "c_rerun"]),
+    ("Reference: Benchmark + off-topic filler", ["baseline", "c_pad"]),
+]
+
+
+def bplus_table(df, by, n_boot, seed):
+    """Benchmark+ = the original questions plus their mutated versions (see the docstring)."""
+    rng = np.random.default_rng(seed)
+    df = df.assign(c=df["condition"].astype(str))
+    rows = []
+    for key, d in (df.groupby(by) if by else [((), df)]):
+        key = key if isinstance(key, tuple) else (key,)
+        have = d.groupby(KEYS)["c"].agg(set)
+        for label, conds in BPLUS_SETS:
+            if not all(c in set(d["c"]) for c in conds):
+                continue
+            ids = have[have.map(lambda s: set(conds) <= s)].index  # questions that have every version in the set
+            s = d[d["c"].isin(conds)].set_index(KEYS).loc[ids].reset_index()
+            if s.empty:
+                continue
+            s["correct_"] = (s["failed"] == 0).astype(float)
+            s["wrong_"] = (s["failed"] - s["abstained"]).clip(lower=0)
+            per = s.groupby(KEYS).agg(n=("c", "size"), h=("hallucinated", "sum"))
+            idx = rng.integers(0, len(per), size=(n_boot, len(per)))
+            rates = per["h"].to_numpy()[idx].sum(1) / per["n"].to_numpy()[idx].sum(1)
+            added = s[s["c"] != "baseline"]
+            rows.append({**dict(zip(by, key)), "benchmark_plus": label, "questions": len(s),
+                         "added_questions": len(added), "correct": int(s["correct_"].sum()),
+                         "wrong": int(s["wrong_"].sum()), "abstained": int(s["abstained"].sum()),
+                         "accuracy": s["correct_"].mean(), "hallucinated": int(s["hallucinated"].sum()),
+                         "hallucination_rate": s["hallucinated"].mean(),
+                         "rate_ci_low": float(np.percentile(rates, 2.5)), "rate_ci_high": float(np.percentile(rates, 97.5)),
+                         "hallucinated_in_added": int(added["hallucinated"].sum()) if len(added) else 0,
+                         "wrong_behavior": int(s["wrong_behavior"].fillna(0).sum()),
+                         "unsupported_but_correct": int(s["unsupported_but_correct"].fillna(0).sum()),
+                         "unfaithful_and_wrong": int(s["unfaithful_and_wrong"].fillna(0).sum())})
+    return pd.DataFrame(rows)
+
+
 METRICS = {"failed": "not correct (wrong + declined)", "hallucinated": "hallucinated"}
 
 
@@ -112,15 +171,26 @@ def combined_table(df, by):
 def main():
     cfg = load_config()
     df = load_results(cfg)
+    nb = min(cfg["evaluation"]["bootstrap_samples"], 1000)
+    bplus, bplus_per = bplus_table(df, [], nb, cfg["evaluation"]["seed"]), bplus_table(df, ["rag", "method"], nb, cfg["evaluation"]["seed"])
     pooled = table(df, [])
     per = table(df, ["rag", "method"])
     out = ROOT / cfg["evaluation"]["output_dir"] / "_report"
     out.mkdir(parents=True, exist_ok=True)
     comb_pooled, comb_per = combined_table(df, []), combined_table(df, ["rag", "method"])
+    bplus.to_csv(out / "benchmark_plus.csv", index=False)
+    bplus_per.to_csv(out / "benchmark_plus_by_rag_method.csv", index=False)
     pooled.to_csv(out / "summary_counts_pooled.csv", index=False)
     per.to_csv(out / "summary_counts.csv", index=False)
     comb_per.to_csv(out / "combined_count.csv", index=False)
-    md = ["# Counts and rates per condition", "",
+    md = ["# Benchmark+ as a bigger benchmark (originals + mutated versions)", "",
+          "Benchmark+ contains the original questions and their mutated versions, so `questions` grows: "
+          "N, 2N (one mutation added), 4N (all three added). Counts are sums over all questions in the set, "
+          "rates are counts / questions; the interval resamples ORIGINAL questions with all their versions. "
+          "`added_questions` / `hallucinated_in_added` count only the mutated rows that were added. "
+          "The two `Reference` rows add a control instead of a mutation (same question again; off-topic filler).", "",
+          "## All RAGs and methods pooled", "", df_to_md(bplus), "", "## Per RAG and method", "", df_to_md(bplus_per), "",
+          "# Counts and rates per condition (each condition on its own, paired with the benchmark)", "",
           "Each mutated condition is the original benchmark question with ONLY that mutation applied; "
           "`Benchmark + M1+M2+M3 (all three)` is the only combined one. `wrong` = not correct and not declined; "
           "`abstained` = declined; wrong + abstained = all failures. `accuracy` = correct / total. "
@@ -135,6 +205,10 @@ def main():
           "(`evaluation.combined: run`).", "", df_to_md(comb_pooled), "", df_to_md(comb_per), ""]
     (out / "summary_counts.md").write_text("\n".join(md), encoding="utf-8")
     pd.set_option("display.width", 250)
+    pd.set_option("display.width", 250)
+    print("Benchmark+ as a bigger benchmark (originals + mutated versions):")
+    print(bplus.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+    print("\nEach condition on its own, paired with the benchmark:")
     print(pooled.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
     print("\nCombined count, step by step (benchmark + new failures of M1 + M2 + M3):")
     print(comb_pooled.to_string(index=False, float_format=lambda v: f"{v:.3f}"))

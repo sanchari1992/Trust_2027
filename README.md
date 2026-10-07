@@ -67,6 +67,8 @@ benchmark-plus/
 │   ├── analyze_eval.py          tables, tests, figure                          section 14
 │   ├── summary_counts.py        counts and rates per condition (total, correct, wrong, accuracy)   section 14.4
 │   ├── audit_hallucinations.py  why did mutated questions count as hallucinations?                 section 16
+│   ├── transition_report.py     which questions are fine/failing in the benchmark and in a mutated version   section 14.8
+│   ├── plot_transitions.py      figure + table: which mutation breaks, fixes, is consistent               section 14.9
 │   ├── compare_mutations.py     are mutated questions closer to real ones?     section 14.5
 │   └── run_all.py               the whole pipeline in order                    section 15
 ├── src/
@@ -862,7 +864,7 @@ Per-question results: `<evaluation.output_dir>/<rag>_<tag>/<method>/<condition>.
 
 | Command | Writes (in `<evaluation.output_dir>/_report/`) |
 |---|---|
-| `python scripts/summary_counts.py` | **`summary_counts.md` / `.csv`, `summary_counts_pooled.csv`, `combined_count.csv`**: for each condition `total`, `correct`, `wrong`, `abstained`, `accuracy` (= correct / total), `hallucinated`, `hallucination_rate`, `wrong_behavior`, `unsupported_but_correct`, `retrieval_hit_rate`, and, against the same question in the unchanged benchmark, `newly_failed`, `newly_fixed`, `failed_in_both` (the same hard questions fail whatever you do), `net_failed`. Pooled and per RAG x method. A second table, "Combined count, step by step", gives benchmark + new failures of M1 + M2 + M3 (section 14.6). |
+| `python scripts/summary_counts.py` | **`summary_counts.md`**, `benchmark_plus.csv`, `benchmark_plus_by_rag_method.csv`, `summary_counts.csv`, `summary_counts_pooled.csv`, `combined_count.csv`. **Table 1, "Benchmark+ as a bigger benchmark"** (section 14.7): Benchmark (N questions), Benchmark + M1 / + M2 / + M3 (2N each: the originals and their mutated versions) and Benchmark + M1 + M2 + M3 (4N), with `questions`, `correct`, `wrong`, `abstained`, `accuracy`, `hallucinated`, `hallucination_rate` and an interval, `hallucinated_in_added` (only the added mutated rows), and the same split of hallucination. **Then, per single condition**: for each condition `total`, `correct`, `wrong`, `abstained`, `accuracy` (= correct / total), `hallucinated`, `hallucination_rate`, `wrong_behavior`, `unsupported_but_correct`, `retrieval_hit_rate`, and, against the same question in the unchanged benchmark, `newly_failed`, `newly_fixed`, `failed_in_both` (the same hard questions fail whatever you do), `net_failed`. Pooled and per RAG x method. A second table, "Combined count, step by step", gives benchmark + new failures of M1 + M2 + M3 (section 14.6). |
 | `python scripts/analyze_eval.py` | `report.md` (the main tables), `summary_by_condition.csv`, `paired_vs_baseline.csv`, `coverage.csv`, `by_operator.csv`, `m3_breakdown.csv`, `label_distribution.csv`, `retrieval.csv`, `hallucination_by_condition.png`, `results_grid.md/.csv/.tex`, `before_after.md`, `before_after_summary.csv`, `before_after_deltas.csv` (details below) |
 | `python scripts/audit_hallucinations.py` | `audit_newly_failing.md` / `.csv` (section 16) |
 
@@ -894,6 +896,64 @@ Running all three mutations in one prompt costs a fifth of the evaluation and mi
 `combined failures = benchmark failures + new failures added by M1 + new failures added by M2 + new failures added by M3`,
 
 counted without double counting (a question that newly fails under two mutations is counted once; `summary_counts.py` prints the plain `sum`, the `union` and the `double_counted` difference). It appears as "Benchmark + M1/M2/M3 combined (any separate run)" (`m_union`) in every table and in the grid, for every outcome (failure, hallucination, wrong behaviour, ...). What it **is**: the failure rate of a benchmark that contains every question in its benchmark, M1, M2 and M3 form, and treats it as failed if any form fails. What it is **not**: a measurement of one prompt that carries all three mutations at once (interactions between them are not measured). If you need that, set `evaluation.combined: run` and `mutation.generate_combined: true` (then `m123` is created, evaluated and shown as "Benchmark + M1+M2+M3 in one prompt"). Because the union takes the maximum over four answers, it rises with the number of conditions even by chance; compare it with the controls (`c_rerun` and `c_pad` columns of `coverage.csv`) before concluding.
+
+---
+
+### 14.7 Benchmark+ as a bigger benchmark (the table to report)
+
+Benchmark+ is the original benchmark **plus** its mutated versions, so it is a larger set of questions (`python scripts/summary_counts.py`, table 1):
+
+| Benchmark+ made of | Questions (N = originals) | Counts are summed over |
+|---|---|---|
+| Benchmark | N | the originals |
+| Benchmark + M1 | 2N | originals + their M1 versions |
+| Benchmark + M2 | 2N | originals + their M2 versions |
+| Benchmark + M3 | 2N | originals + their M3 versions |
+| Benchmark + M1 + M2 + M3 | 4N | originals + their M1, M2 and M3 versions |
+| Reference: + same question again | 2N | originals + a second answer to the same question (noise floor) |
+| Reference: + off-topic filler | 2N | originals + the filler control |
+
+Number of questions, `correct`, `wrong`, `abstained`, `hallucinated` are plain sums; `accuracy = correct / questions` and `hallucination_rate = hallucinated / questions`. `hallucinated_in_added` counts only the mutated rows, so you can see how many of the added questions hallucinated. The interval resamples ORIGINAL questions together with all their versions, because a question and its mutated versions are not independent tests. Only questions that have every version in the set are used, so N is identical in all rows.
+
+Two things to keep in mind when quoting it. (1) The rate of a mutated Benchmark+ is the average over its questions, so adding versions moves it only as far as the added versions differ from the originals; to say how much the mutated versions themselves hallucinate, compare `hallucinated_in_added / added_questions` with the benchmark's own rate, and use the paired tables of section 14.4 for tests. (2) The two `Reference` rows are what the same table looks like when nothing meaningful is added; a mutation must beat them.
+
+---
+
+### 14.8 Which questions change status? (`scripts/transition_report.py`)
+
+```bash
+python scripts/transition_report.py
+```
+
+For each mutation (M1, M2, M3) and each control, and for three outcomes (`not_correct` = wrong or declined, `hallucinated`, `wrong_behavior`), every question is in exactly one cell:
+
+| Cell | Benchmark | Mutated version |
+|---|---|---|
+| `fine_to_fine` | fine | fine |
+| `fine_to_FAIL` | fine | failing: the mutation exposed it |
+| `FAIL_to_fine` | failing | fine: the mutation fixed it |
+| `FAIL_to_FAIL` | failing | failing: fails whatever you do |
+
+Also given: `benchmark_fails`, `condition_fails`, `net_change` (= `fine_to_FAIL` - `FAIL_to_fine`), the exact McNemar `p_mcnemar` and a Benjamini-Hochberg `q_value` per outcome. The control rows show how many questions change status with no mutation at all; a mutation must change more than that. A second table treats the three mutations together: fine in the benchmark but failing in at least one / in all three, failing in the benchmark but fine in at least one / in all three, failing in the benchmark and in at least one / in all three, fine everywhere, and `fails_somewhere` (the union). Files in `_report/`: `transitions.md`, `transitions.csv`, `transitions_any_of_three.csv` (pooled and per RAG x method) and `transitions_questions.csv`, one row per question with its status in every condition (`<outcome>__<condition>`, 1 = failing), so you can open the questions in any cell.
+
+---
+
+### 14.9 Which mutation breaks, fixes or is consistent? (`scripts/plot_transitions.py`)
+
+```bash
+python scripts/plot_transitions.py                          # hallucinated, wrong_behavior and not_correct
+python scripts/plot_transitions.py --outcome hallucinated
+```
+
+One figure per outcome (`transitions_<outcome>.png` and `.pdf`, in `<evaluation.output_dir>/_report/`), three panels:
+
+| Panel | Shows | How to read it |
+|---|---|---|
+| A, what each mutation does | per mutation (and the two controls, hatched): questions **newly failing** (orange, right), questions **fixed** (green, left), net change under the name | Which mutation breaks the most fine questions, which one fixes some. A mutation must beat the hatched control bars. |
+| B, which mutations break the same questions | an UpSet plot over the questions that were fine in the benchmark: how many fail under only M1, only M2, only M3, M1+M2, ..., all three | Orange bars (one mutation only) = failures only that mutation finds; grey bars = failures shared by two or three mutations, i.e. fragile questions that any rewording breaks. |
+| C, consistency | rows: fine / failing in the benchmark; columns: in how many of M1, M2, M3 the question fails (0 to 3) | Top right = fragile questions; bottom right = questions that fail whatever you do (hard questions); bottom left = failing only in the benchmark (fixed by every mutation). |
+
+`transition_summary.md` and `transition_summary_<outcome>.csv` hold the numbers behind panel A (`newly_failing`, `fixed`, `failing_in_both`, `fine_in_both`, `net_change`, `flip_rate` = share of questions that change status in either direction) and, for each mutation, how much of its newly failing set is unique to it (`newly_failing_unique_to_it`, `share_unique`) versus shared with another mutation. Needs `baseline`, `m1`, `m2` and `m3` in the results.
 
 ---
 
@@ -953,4 +1013,4 @@ Each item answers a way a Benchmark+ result could be misread.
 | B, main | tier A, or any statement unsupported by the retrieved text (the user's message counted as support) | `hallucinated` |
 | C, upper bound | tier B, and also statements that only repeat the user | `hallucinated_strict` |
 
-Report B as the main result and A beside it; C is an upper bound and should be labelled as one. Failures (`accuracy`, `wrong`, `abstained` in `summary_counts.py`) are a different question from hallucination: declining to answer an answerable question is a failure, not a hallucination. A small effect must be larger than the `c_rerun` change and its interval (section 14.4) before it counts, and the audit must show that the extra failures are real.
+Use the Benchmark+ table of section 14.7 (counts and rates over the originals plus their mutated versions) as the headline, with the paired tables for the statistics. Report B as the main result and A beside it; C is an upper bound and should be labelled as one. Failures (`accuracy`, `wrong`, `abstained` in `summary_counts.py`) are a different question from hallucination: declining to answer an answerable question is a failure, not a hallucination. A small effect must be larger than the `c_rerun` change and its interval (section 14.4) before it counts, and the audit must show that the extra failures are real.
