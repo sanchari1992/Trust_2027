@@ -10,6 +10,8 @@ Code for a study of RAG benchmarks: do benchmarks made by RAGAS, ARES and DataMo
 
 All language-model calls go to DeepSeek; all embeddings run locally. DSRS compression is not in this repository yet.
 
+**How this README is organised.** Sections 1 to 17 (Part A) say how to run and configure everything. Sections 18 to 28 (Part B, "Paper companion") give the study design, definitions, formulas, statistics, evidence, limitations and a map from the outputs to the sections of a paper.
+
 ---
 
 ## 1. Quick start
@@ -1014,3 +1016,337 @@ Each item answers a way a Benchmark+ result could be misread.
 | C, upper bound | tier B, and also statements that only repeat the user | `hallucinated_strict` |
 
 Use the Benchmark+ table of section 14.7 (counts and rates over the originals plus their mutated versions) as the headline, with the paired tables for the statistics. Report B as the main result and A beside it; C is an upper bound and should be labelled as one. Failures (`accuracy`, `wrong`, `abstained` in `summary_counts.py`) are a different question from hallucination: declining to answer an answerable question is a failure, not a hallucination. A small effect must be larger than the `c_rerun` change and its interval (section 14.4) before it counts, and the audit must show that the extra failures are real.
+
+---
+
+# Part B. Paper companion
+
+Sections 1 to 17 explain how to run the code. Sections 18 to 28 explain **what the study is, why each choice was made, how every number is computed, what the evidence can and cannot support, and where each piece belongs in a conference paper.** Everything here is consistent with the code; where a choice is ours rather than from a published paper, it is marked **(ours)**. Where a result is only a pilot, it is marked **(preliminary)**.
+
+## 18. The study in one page
+
+**Problem.** RAG systems are evaluated on benchmarks whose questions are generated automatically from the corpus (RAGAS, ARES, DataMorgana). Such questions are clean: one sentence, well formed, self-contained, with no user-supplied beliefs. Real users write differently (section 11). If a benchmark does not look like real use, a RAG that scores well on it may still fail, and hallucinate, on real queries. A benchmark that is too easy under-reports hallucinations.
+
+**Idea.** Keep every benchmark question and its reference answer, and make controlled, answer-preserving (or answer-changing, in a known way) rewrites of it that move it toward real queries along three axes. The original plus its rewrites is **Benchmark+**.
+
+**Research questions and hypotheses.**
+
+| # | Question | Hypothesis | Evidence in the code |
+|---|---|---|---|
+| RQ1 | Do generated benchmark questions differ measurably from real user queries? | Yes: shorter, one sentence, more often a fully formed question, less first-person, less informal. | `compare_queries.py` (section 11): 25 features, Mann-Whitney + BH, classifier AUC |
+| RQ2 | Do the three mutations make the questions more realistic? | Yes, in the targeted features, without becoming easier to tell apart from real queries. | `compare_mutations.py` (section 14.5) |
+| RQ3 | Does each mutation expose hallucinations that the unchanged benchmark did not? | Yes: more questions fail or hallucinate under M1, M2, M3 than in the benchmark, by more than the controls explain. | `summary_counts.py`, `analyze_eval.py`, paired tests, controls |
+| RQ4 | Do the mutations expose *different* questions? | Partly: each exposes some failures the others do not, so Benchmark+ finds more than any one mutation. | transition report and plots (14.8, 14.9); `m_union` |
+| RQ5 | Are the extra failures real hallucinations or measurement artefacts (judge, retrieval, noise)? | Mostly real, after controlling for judge, retrieval and noise. | audit, retrieval check, controls (section 16) |
+| RQ6 | Does the effect depend on the RAG architecture and on the benchmark generator? | Yes, in size. | per RAG x method tables, results grid |
+
+**Contributions the code supports.** (1) A feature-based comparison of benchmark and real queries. (2) A formal framework of three mutation families with stated guarantees and per-item verification (13.2). (3) A hallucination protocol with three tiers, a judge that does not punish repeating the user, and controls (14.2, 16, 17). (4) Benchmark+ counted as a larger benchmark with cluster-aware intervals (14.7). (5) A transition analysis (which mutation breaks, fixes or is consistent; 14.8-14.9). Not in this repository: DSRS compression (future work).
+
+## 19. System and data
+
+### 19.1 Pipeline
+
+```
+corpora -> indexes -> generate (RAGAS | ARES | DataMorgana) -> stats
+        -> mutate (M1, M2, M3 [, m123]) -> evaluate (baseline, m1, m2, m3, c_rerun, c_pad)
+        -> analyze / summary_counts / transition_report / plot_transitions / audit
+        -> compare_mutations (realism against real queries)
+```
+
+Each of the 3 RAGs x 3 methods = 9 cells has its own question file, mutated files and result files. Questions keep their `id` through every stage, so any two conditions pair by `id`.
+
+### 19.2 The three RAG systems
+
+| RAG | Corpus | Retrieval unit | Retrieval | Generator | Settings used here |
+|---|---|---|---|---|---|
+| LightRAG (Guo et al.) | UltraDomain `mix` subset, first 10 documents (general domain) | text chunks + knowledge-graph entities and relations | `hybrid` (local + global) over a graph extracted by the LLM | DeepSeek | chunks 400 tokens, overlap 50 (default 1200, reduced to fit the embedder) |
+| RAPTOR (Sarthi et al.) | QuALITY `dev`, first 10 articles (long stories, general domain) | chunk and summary nodes of a tree | top 10 nodes from any layer, 3500-token context cap | DeepSeek | chunks 100 tokens, up to 5 layers, 100-token summaries; **one tree for all documents** (paper: one tree per document) |
+| MedRAG (Xiong et al.) | the first 3 of the 18 medical textbooks (medical domain) | flat snippets | MedCPT retriever, top 32 | DeepSeek | re-implementation of the pipeline, not a call into the released code |
+
+These three differ on purpose: graph-based, hierarchical-summary and flat retrieval, in general and medical domains. The corpora are **small subsets** chosen so the study is affordable; the paper must say so (section 21, threats).
+
+### 19.3 The models
+
+| Role | Model | Where |
+|---|---|---|
+| All LLM calls: index building, answering, benchmark generation, mutation writing and checking, judging | DeepSeek (`llm.model`, default `deepseek-flash`; thinking disabled; temperature 0 for answering and judging, 0 for generation, 0.3 for writing mutation text) | `llm:`; the judge can be a different model (`evaluation.judge_llm`) |
+| Embeddings (LightRAG, RAPTOR, generator filters, M2 `synonyms` similarity gate) | `BAAI/bge-small-en-v1.5`, local | `embedding:` |
+| MedRAG retriever | MedCPT | inside MedRAG |
+| Text features | spaCy `en_core_web_sm` | `real_queries.spacy_model` |
+
+**By default the generator, the RAG's answerer and the judge are the same model.** Self-preference and shared blind spots are possible; the code supports a separate judge, and a final run should use one (section 21).
+
+### 19.4 Benchmark generators (as implemented)
+
+All three work on passages: the corpus is cut into passages of about `passage_words` words (RAGAS 250, ARES 100, DataMorgana 300 **(ours: guesses from the papers)**), whole sentences packed together; passages under 40 words are dropped. Passages are visited in `spread` order (round-robin over documents). One question per passage by default. Size: 2 questions per 1,000 corpus words, between 20 and 300. Shared filters: duplicate check (embedding cosine at least 0.9) and `drop_context_references` **(ours)**, which removes questions that mention "the passage" or "given context".
+
+| Method | Source paper | What is implemented | What differs from the paper |
+|---|---|---|---|
+| RAGAS | Es et al., EACL 2024 | the paper's two prompts: formulate ONE question under six rules from a context; answer it from the context only. No filtering in the paper | DeepSeek instead of ChatGPT; the newer knowledge-graph test-set generator of the `ragas` library is **not** used |
+| ARES | Saad-Falcon et al., NAACL 2024, Sect. 3.1 | few-shot "Document / Query" prompt for the query, few-shot "Query / Document / Answer" prompt for the answer, **round-trip filter** (the query must retrieve its own passage at rank 1), optional negatives | DeepSeek instead of FLAN-T5 XXL; local embeddings and exact search instead of OpenAI ada + FAISS; few-shot examples are generic or medical examples written for this project (**not** in-domain human-written ones); weak answer negatives not stored |
+| DataMorgana | Filice et al., 2025, Sect. 3 | JSON of user and question categorizations; one category per categorization is picked by probability; k = 3 candidate Q&A pairs from the paper's prompt; **filter** for constraints, category adherence and answer faithfulness; one passing candidate is sampled | DeepSeek instead of Claude 3.5 Sonnet; the paper does not publish the filter prompt (**ours**) or the category probabilities (uniform here); the document is one passage |
+
+Every generated item stores the question, the reference answer, `passage_ids`, `contexts` (the source passage) and meta. The source passage is what the mutation checks and the retrieval check refer to.
+
+## 20. Real queries and the realism analysis (RQ1, RQ2)
+
+### 20.1 Data
+
+| Domain | Real set | Built from | Used against |
+|---|---|---|---|
+| general | `data/real_queries/general.jsonl` | first user turn of WildChat-1M and LMSYS-Chat-1M conversations; English; 3 to 200 words; reservoir-sampled, 2,000 per source | LightRAG and RAPTOR questions |
+| medical | `data/real_queries/medical.jsonl` | the health-flagged user turns of HealthChat-11K (annotations) pulled from the same two source datasets | MedRAG questions |
+
+Both source datasets are gated and need Hugging Face access. **Check the HealthChat field names against the annotation file before trusting `medical.jsonl`** (section 11; unverified).
+
+### 20.2 The 25 features
+
+Computed per question, no LLM calls.
+
+*Graph features (13)*, from a lightweight directed graph built with spaCy: a node per content token (NOUN, PROPN, VERB, ADJ, ADV, not stopword) and an edge per dependency between two kept tokens (a path through dropped tokens collapses to one edge). This is a structural proxy for how the question is built, not a semantic knowledge graph. Features: `n_tokens`, `n_sentences`, `n_nodes`, `n_edges`, `graph_density`, `avg_degree`, `max_depth`, `n_components`, `largest_component_frac`, `n_entities`, `n_entity_types`, `has_wh_word`, `starts_with_verb` (first word is a verb). Known simplification: a content word whose only link runs through a stopword root ends up in its own component, so `n_components` slightly overcounts; it is applied identically to both sets, so it does not favour either.
+
+*Lexical features (12)*: `char_len`, `word_len`, `lexical_diversity` (unique / total words), `avg_word_len`, `n_question_marks`, `n_sentences_punct`, `starts_lowercase`, `has_typo_like_repeat` (a character repeated 3+ times, "whyyy"), `has_hedge` ("maybe", "I think", "not sure", ...), `has_first_person`, `has_politeness_marker` ("please", "could you", ...), `ends_with_question_mark`.
+
+### 20.3 Tests
+
+1. **Per feature:** difference of means with a 95% bootstrap interval (2,000 resamples), Mann-Whitney U, Benjamini-Hochberg correction over the 25 tests (`q_value`).
+2. **Classifier two-sample test:** logistic regression on the 25 features; 70/30 split; held-out AUC (0.5 = indistinguishable, 1.0 = perfectly separable) plus 5-fold cross-validation on the training part, and the features driving the separation.
+
+**Finding from section 11 (the motivation of the mutations):** in every RAG x method, real queries are longer (about 2.8 sentences against 1.0), start with a verb far more often, and are more often lowercase, first-person, polite, stretched ("whyyy", "???") and less often end in `?`.
+
+### 20.4 The circularity caveat (must be in the paper)
+
+The mutations were designed from these features, and the AUC uses the same features. A drop in AUC after mutation is therefore partly by construction. Mitigations built in: (a) the classifier is a different kind of test from the per-feature design, (b) `compare_mutations.py` accepts `--real-file`: **use real queries you did not look at while designing the mutations** (a held-out sample or a different source dataset), (c) report that the realism claim is about these features only. A stronger check (human raters, or a classifier on embeddings of text rather than hand features) is future work.
+
+### 20.5 Realism pilot (preliminary)
+
+One pilot (n = 20 per set, MedRAG/RAGAS, an earlier version of M1 and M3): AUC of benchmark 0.944, M2 0.861, M3 1.000, M1 overshoots in word count. **n = 20 is far too small to quote**; the point is only that M1 length targeting and M3 naturalization were changed afterwards (13.8) and the realism numbers have to be recomputed on a real run (`compare_mutations.py`). A mutation that is easier to tell from real queries than the benchmark itself (AUC above the benchmark's) is not making the benchmark more realistic; say so in the paper if it happens.
+
+## 21. The three mutations as a method
+
+The full operator tables, the algorithm and the parameters are in section 13. This section gives the conceptual frame for the paper.
+
+### 21.1 Design principle
+
+A mutation must (i) move the question toward real use along one axis, (ii) leave the correct response known, and (iii) be separable, so the effect of each axis can be measured on its own. Hence **each mutated condition is the original question with only that mutation** (never cumulative: M2 is original + M2, not original + M1 + M2), and the reference answer for the mutated question is stored with it.
+
+| Mutation | Axis | Realism target (section 11) | Expected effect on a RAG | Reference answer |
+|---|---|---|---|---|
+| M1 length | more words, more sentences | real queries are longer | added on-topic text can distract the model and the retriever; content is passage-entailed, so the right answer does not change | unchanged |
+| M2 linguistic | how it is written | lowercase, typos, first person, polite, imperative, stretched punctuation | surface noise can hurt retrieval and parsing; meaning is unchanged | unchanged |
+| M3 user information | what the user asserts | users state beliefs, some wrong | tests sycophancy / premise acceptance, not just retrieval: a wrong claim should be rejected, an unsupported detail flagged | unchanged (correct claims) or rewritten (incorrect ones) |
+
+### 21.2 Guarantees
+
+Formal assumptions A1 to A4 and propositions P1 to P7 are in 13.2. Summary for the paper: P1 and P4 (except `synonyms`) hold by construction; P2, P3, P5, P6 and `synonyms` rely on an LLM check per item (A4: verifier soundness, **empirical, not a theorem**); items failing the check are dropped, not kept; P7 (composition) assumes the M1 text and the M3 claim do not interact, which is plausible and not proved. The paper should report the check pass rates (`_meta/.../*.meta.json`) and the result of hand-auditing a random sample of mutated questions (a suggested size: 100 per mutation), which is the only validation of A4.
+
+### 21.3 Choices that are ours (must be disclosed)
+
+M1's target length drawn from the real-query word-count distribution (`length.target.mode: real`; cap 100 words, at most 3 operators, slack 1.4); the appositive rules (3 to 14 words, no figure/caption/colour descriptions, no instructions); M3's naturalization pass (accepted only if at least 80% of the claim's words and all numbers survive); operator weights (`first_person` 0.7, `politeness` 0.5, others 1.0) and `p_correct` = 0.5; the typo rate (15% of words of at least 5 letters, between 1 and 3 typos, never in numbers, acronyms, negations or quantifier words); the `synonyms` safety gates (three most frequent senses, same POS, sentence-similarity at least 0.9, LLM approval per swap).
+
+### 21.4 Why `m123` is derived
+
+Running all three in one prompt mixes three effects, costs a fifth of the evaluation and relies on the non-interaction assumption of P7. The default is a derived condition `m_union` (a question fails if it fails in the benchmark or in any of M1, M2, M3), which has a clear meaning: **the failure rate of a benchmark that contains each question in all four forms and calls it failed if any form fails.** It is not a measurement of one prompt carrying all three mutations. The optional `m123` exists for that (`evaluation.combined: run`).
+
+## 22. Evaluation protocol (RQ3 to RQ5)
+
+### 22.1 Procedure per (RAG, method)
+
+1. Draw `sample_per_file` questions (default 500, seed 42) from those that survived all mutations; the same set in every condition.
+2. For each condition, ask the RAG the condition's question. Keep the answer, the retrieved contexts and the retrieval flags.
+3. Judge every answer (22.2). 
+4. A stored result is reused only if its question text and reference answer are unchanged (else dropped and redone).
+
+Cost: about 6 LLM calls per answer (answer generation inside the RAG varies by RAG; judge: statement split, support verdict, label, plus the strict-score pass).
+
+### 22.2 The judge
+
+**Faithfulness** (RAGAs paper, Sect. 3, two prompts): an LLM splits the answer into short statements; an LLM decides for each whether the retrieved context supports it; `F = supported / total`. The two instructions are the paper's; the worked example and the answer format are ours. An answer that declines or flags a problem makes no claim and scores 1.0.
+
+*Two versions.* The **main** score counts the user's own message as context, marked so that it supports only statements that repeat what the user said. Without this, a system that says "as you mentioned, X" would be punished for repeating the user, and M3 would look like a hallucination generator by construction (early results showed exactly this artefact). The **strict** score uses the retrieved context only.
+
+**Behaviour label** against the reference answer, by the item's expected behaviour:
+
+| Expected | Applies to | Possible labels | Failure | Wrong behaviour |
+|---|---|---|---|---|
+| `answer` | baseline, m1, m2, correct M3 | correct, incorrect, abstained | incorrect, abstained | incorrect |
+| `reject_premise` | incorrect M3 with a false claim (`false_premise`, `wrong_candidate`) | corrected, consistent, followed_false_claim, abstained | followed_false_claim, abstained | followed_false_claim |
+| `abstain` | M3 `unsupported_assumption` | flagged, answered_core, accepted_detail | accepted_detail | accepted_detail |
+
+### 22.3 Outcome definitions (use these exact words)
+
+| Term | Definition |
+|---|---|
+| failure ("not correct") | label is a failure label; includes abstaining on an answerable question |
+| `wrong_behavior` | asserted something wrong, or adopted a false or unsupported user claim (no faithfulness involved) |
+| `unfaithful` | main faithfulness below `faithfulness_threshold` (1.0: any unsupported statement) |
+| **`hallucinated`** | `unfaithful` OR `wrong_behavior`. **Abstaining is a failure but not a hallucination.** The main metric |
+| `hallucinated_strict` | the same with the strict score; an upper bound |
+| `unfaithful_and_wrong` | unfaithful AND failing: the strongest candidate for a real hallucination |
+| `unsupported_but_correct` | unfaithful but judged correct: beyond the retrieved text, answer right (often the model's own true knowledge) |
+| `abstained` | label `abstained` |
+| `retrieval_hit`, `gold_recall` | the source passage was among the retrieved texts (a gold passage counts if one retrieved text contains at least 60% of its words) |
+
+**Hallucination tiers:** A strict (`wrong_behavior` or `unfaithful_and_wrong`), B main (`hallucinated`), C upper bound (`hallucinated_strict`). Report B, show A beside it, label C an upper bound (section 17).
+
+### 22.4 Controls
+
+| Control | What it is | What it tells you |
+|---|---|---|
+| `c_rerun` | the unchanged question asked again | **noise floor**: the RAG and the LLM are not deterministic, so some questions flip with no change; a mutation's effect must exceed this |
+| `c_pad` | the original plus off-topic filler as long as M1's addition | whether extra *length* alone hurts. It is harsher than M1: filler shares no words with the question and dilutes the retrieval query, so it measures "irrelevant text hurts retrieval" and is **not a clean length-only control** for M1 (M1's additions are on topic). A cleaner control (topic-relevant padding that does not change the answer) is future work. The retrieval table shows which effect it is |
+
+### 22.5 Counting units
+
+The unit of analysis is the original question. Per condition: `questions`, `correct`, `wrong`, `abstained`, `hallucinated`; `accuracy = correct / questions`; `hallucination_rate = hallucinated / questions`.
+
+## 23. Statistics
+
+| Quantity | Method | Where |
+|---|---|---|
+| a rate in one condition | Wilson 95% interval (binomial, good for small counts) | `report.md`, grids |
+| change of a rate versus the benchmark (same questions) | paired difference, 95% paired bootstrap interval over questions (2,000 resamples) | `paired_vs_baseline.csv` |
+| is the change real? | exact McNemar test on the discordant pairs (`newly_failing` vs `newly_passing`), Benjamini-Hochberg `q_value` over the family of tests | same |
+| the pooled Benchmark+ table | cluster bootstrap: resample ORIGINAL questions with all their versions, because a question and its mutated versions are not independent | `benchmark_plus.csv` |
+| noise | the `c_rerun` row is the change expected with no mutation; a mutation counts only if its change is larger than that and its interval | `coverage.csv`, `transitions.md` |
+| feature differences, realism | Mann-Whitney U, bootstrap interval, BH; logistic-regression AUC | `feature_table.csv`, `summary.json` |
+
+**Why McNemar and not a two-proportion test:** the two conditions are answers to the same questions, so only the questions that change status carry information. **Why BH:** many conditions x metrics x (RAG, method) cells are tested. State the family (e.g. all condition x metric tests in one table).
+
+## 24. Benchmark+ as a larger benchmark, and the transition view
+
+### 24.1 Counting
+
+N = number of original questions; every row uses the same N questions that have every version.
+
+| Row | Questions | Made of |
+|---|---|---|
+| Benchmark | N | originals |
+| Benchmark + M1 (also M2, M3) | 2N | originals + the mutated version |
+| Benchmark + M1 + M2 + M3 | 4N | originals + the M1, M2 and M3 versions |
+| reference: + same question again | 2N | noise floor |
+| reference: + off-topic filler | 2N | the harsh control |
+
+`hallucinated_in_added` is the count among the added rows only, so the contribution of the mutated versions is visible. Pooled rates are averages over questions, so adding versions moves a rate only as far as the added versions differ from the originals: compare `hallucinated_in_added / N` with the benchmark's own rate.
+
+### 24.2 The "net-change" formula versus the union and the pooled table
+
+Three ways to combine, and they differ; say which one you report:
+
+| Definition | Formula | Property |
+|---|---|---|
+| net-change | `H(bench) + sum_k (H(Mk) - H(bench))` over k = 1..3 | simple; counts a question that fails under two mutations twice; can exceed the union |
+| union (`m_union`) | questions failing in the benchmark or in any of M1/M2/M3 | no double counting; over N questions; rises with the number of conditions even by chance |
+| pooled Benchmark+ (**headline**) | sum over the 4N rows | treats Benchmark+ as a bigger benchmark; denominators 2N and 4N |
+
+### 24.3 Transitions (what changes status)
+
+For each mutation and outcome, each question is in one cell: `fine_to_fine`, `fine_to_FAIL` (the mutation exposed it), `FAIL_to_fine` (the mutation fixed it), `FAIL_to_FAIL` (hard whatever you do). The net change is `fine_to_FAIL - FAIL_to_fine`. Across mutations: how many fine questions fail under only one, two or all three (fragile questions); how many failing ones every mutation fixes; `flip_rate` = share that change either way. Interpretation guide: a large `FAIL_to_fine` shows that *the benchmark's own failures are partly noise* (a question fails once and passes with a small rewording), which is the reason the `c_rerun` row matters; a mutation is *discriminating* if its newly-failing set is mostly unique to it (`share_unique`); questions in the all-three cell are the fragile ones any rewording breaks. (Plots: 14.9.)
+
+## 25. Evidence ledger
+
+What can be claimed from what, and how strongly.
+
+| Claim | Supported by | Strength now |
+|---|---|---|
+| Benchmarks differ from real queries | section 20 tests | strong if real sets are large; report n |
+| Mutations move questions toward real queries | `compare_mutations.py` (features, AUC) | **not yet established** on the final version (pilot only); circular unless held-out |
+| Mutated questions keep (or correctly change) the answer | per-item checks + hand audit | checks exist; hand audit still to do |
+| Mutations expose more hallucinations than the benchmark | paired tables, McNemar, pooled table | pilot positive, see 25.1 |
+| ... more than noise | `c_rerun` | pilot positive |
+| ... more than length alone | `c_pad` | **not a clean test**, see 22.4 |
+| ... and the extra failures are real hallucinations | audit, `unfaithful_and_wrong`, tier A | partly; needs the hand-read audit |
+| Effects depend on RAG and generator | per cell tables | untested beyond one cell |
+
+### 25.1 Pilot results (preliminary)
+
+One cell only: MedRAG x RAGAS, 290 questions, DeepSeek as generator, answerer and judge. Treat as a demonstration of the report format, **not as findings**.
+
+| Condition | Hallucinated (tier B) | Rate | Note |
+|---|---|---|---|
+| Benchmark | 22 | 7.6% | |
+| + M1 | 31 | 10.7% | |
+| + M2 | 36 | 12.4% | |
+| + M3 | 34 | 11.7% | |
+| union (any of the four) | 79 | 27.2% | rises with number of conditions |
+| control: same question again | 21 | 7.2% | noise floor (close to the benchmark) |
+| control: filler | 76 | 26.2% | 16 abstained; retrieval hit 0.434 against 0.634: mostly a retrieval effect |
+
+`wrong_behavior`: benchmark 6, M1 5, M2 8, M3 11, union 22, re-run 7, filler 14. Benchmark hallucinations that disappear under mutation: 12 (M1), 9 (M2), 15 (M3), which is why the benchmark's own failures are partly unstable. In an earlier, smaller run MedRAG never adopted a false claim. Reading: mutated conditions are higher than the benchmark and the re-run control is not, which is the direction the hypothesis needs; the strength of the filler control shows that retrieval dilution can produce large effects, so M1's smaller gain should be read with the retrieval table. Counts of 5 to 30 questions have wide intervals (use the Wilson and bootstrap columns), and one RAG, one generator and one model proves nothing about the others.
+
+## 26. Threats to validity and limitations (write these in the paper)
+
+**Construct.** *Hallucination is operational:* a statement the retrieved text (plus the user's message) does not support, or wrong behaviour. A true statement from the model's own knowledge counts as unfaithful in tier B (shown separately as `unsupported_but_correct`). Abstention is excluded on purpose. *Expected behaviour for M3* is set by the mutation design (P5, P6); whether a system *should* correct a user is a normative choice.
+**Internal.** *LLM judge:* same model generates, answers and judges by default (self-preference; shared errors); mitigate with a separate judge and a hand-labelled sample to report judge agreement (precision and recall of the judge against humans; not yet in the repository). *Verifier soundness (A4):* LLM checks of the mutations are empirical. *Non-determinism:* answered by `c_rerun`, not eliminated. *Retrieval confound:* extra length or text changes what is retrieved; the retrieval table separates it, not removes it. *Design circularity:* section 20.4.
+**External.** Small corpora (10 documents, 10 articles, 3 textbooks); one LLM family; three RAGs; English; real queries are first turns of chat conversations (not queries to a RAG with a document store); HealthChat field mapping is unverified; the few-shot examples for ARES are not in-domain human-written.
+**Statistical.** Counts per cell are small in the pilot; many tests (BH applied within families, not across the whole paper); the union is inflated by taking a maximum; the pooled table's rows share the original questions (handled by the cluster bootstrap, but not by the plain Wilson interval).
+**Ethical.** The real-query datasets contain user text that may include personal data; use under their licences, do not publish raw queries, and report only aggregates.
+
+## 27. Reproducibility
+
+- **Seeds:** `benchmark.seed`, `mutation.seed`, `evaluation.seed` (42). Every random choice in mutation depends only on (seed, question id, mutation), so runs, resumes and concurrency levels give identical mutated files. LLM calls cannot be seeded; temperature 0 makes them as repeatable as the API allows.
+- **Guards:** the mutate step refuses to continue after a change of seed, temperature, retries, `length`, `linguistic`, `userinfo` or `llm.model` unless you pass `--fresh` (never mixes settings); the evaluation drops stored results whose question or reference answer changed.
+- **Exact commands for the full study:**
+  ```bash
+  python scripts/run_all.py --profile large --dry-run
+  python scripts/run_all.py --profile large
+  python scripts/summary_counts.py
+  python scripts/transition_report.py
+  python scripts/plot_transitions.py
+  ```
+- **Record in the paper:** the model name and date, `config.yaml` and the profile, corpus statistics (`scripts/corpus_stats.py --markdown`), real-query sample sizes and seeds, number of questions per cell after each filter (`_meta` files), the pass rate of each check, the library versions (`requirements.txt`) and the git commit.
+- **Files to archive:** the per-question result files (`results/eval/<rag>_<tag>/<method>/<condition>.jsonl`), the mutated files, `_report/`.
+
+## 28. From this repository to a paper
+
+### 28.1 Suggested structure and where to find the material
+
+| Paper section | Content | Source in this README | Output files |
+|---|---|---|---|
+| Introduction | problem, idea, RQ1 to RQ6, contributions | 18 | |
+| Related work | RAGs, generators, hallucination judging, sycophancy, query realism | 19.2, 19.4, 22.2 (cite below) | |
+| Systems and data | three RAGs, corpora, generators | 19, 10, 9 | `corpus_stats.md` |
+| Real queries | datasets, features, tests | 20, 11 | `feature_table.csv`, `summary.json` |
+| Method: Benchmark+ | mutations, guarantees, check | 21, 13 | `_meta/*.meta.json`, `mutation_feature_shift.md` |
+| Evaluation protocol | conditions, judge, outcomes, controls, statistics | 22, 23 | |
+| Results | realism; hallucination tables; transitions; retrieval; audit | 14, 24, 25 | `summary_counts.md`, `results_grid.tex`, `transitions.md`, `transitions_*.png`, `audit_newly_failing.md`, `report.md`, `retrieval.csv` |
+| Discussion and limits | 26 | 26 | |
+| Future work | DSRS compression; topic-relevant padding control; separate judge and human-labelled validation; held-out real queries; more RAGs, models and corpora; human realism ratings | 26 | |
+
+### 28.2 Tables and figures to include
+
+1. Real-versus-benchmark feature table (top features) and the AUC per cell.
+2. Mutation operator table (13.3, 13.4, 13.5) with one example each.
+3. **Benchmark+ table** (`summary_counts.md`, table 1) with the two reference rows.
+4. Results grid per metric (`results_grid.tex`, a paste-ready `booktabs` table).
+5. Transition figure (`transitions_hallucinated.pdf`, panels A, B, C) and the any-of-three table.
+6. Retrieval table (`retrieval.csv`) next to the controls.
+7. Audit table (category counts) with two or three worked examples.
+
+### 28.3 Wording to avoid and wording to use
+
+| Avoid | Use |
+|---|---|
+| "mutations find more hallucinations" (without controls) | "more than the same-question control by X points (95% CI ...)" |
+| "Benchmark+ has a hallucination rate of ..." (alone) | the pooled rate with its definition (4N rows), plus `hallucinated_in_added` |
+| "the combined mutation" (for `m_union`) | "a question fails if it fails in the benchmark or any mutated form" |
+| "length makes models hallucinate" | "on-topic length (M1) ... ; off-topic filler mainly lowered retrieval" |
+| "hallucination" for abstention | "failure to answer" |
+| "the mutations preserve the answer" | "preserve the answer under assumptions A1 to A4, verified per item by an LLM and hand-audited on a sample" |
+
+### 28.4 Glossary
+
+**Benchmark+** the original benchmark plus its mutated versions. **Condition** one way of asking a question (`baseline`, `m1`, `m2`, `m3`, controls, derived). **Mutation** a rewrite of a question (M1 length, M2 linguistic, M3 user information). **Operator** one concrete rewrite inside a mutation (e.g. `typos`). **Expected behaviour** what a correct response does for an item: `answer`, `reject_premise`, `abstain`. **Faithfulness** share of an answer's statements supported by the context. **Hallucinated** unfaithful or wrong behaviour (tier B). **Newly failing / fixed** fine in the benchmark and failing in the mutated version, and the reverse. **Union** a question fails in any version. **Pooled** summed over the original and mutated rows. **Retrieval hit** the source passage was retrieved. **Noise floor** the status changes of the same question asked again.
+
+### 28.5 References to cite (check the final bibliographic details yourself)
+
+- Es, S., James, J., Espinosa-Anke, L., Schockaert, S. RAGAs: Automated Evaluation of Retrieval Augmented Generation. EACL 2024 (demo).
+- Saad-Falcon, J., Khattab, O., Potts, C., Zaharia, M. ARES: An Automated Evaluation Framework for RAG Systems. NAACL 2024.
+- Filice, S., et al. Generating Diverse Q&A Benchmarks for RAG Evaluation with DataMorgana. 2025.
+- Guo, Z., et al. LightRAG: Simple and Fast Retrieval-Augmented Generation. 2024.
+- Sarthi, P., et al. RAPTOR: Recursive Abstractive Processing for Tree-Organized Retrieval. ICLR 2024.
+- Xiong, G., et al. Benchmarking Retrieval-Augmented Generation for Medicine (MedRAG / MIRAGE). Findings of ACL 2024.
+- Zhao, W., et al. WildChat: 1M ChatGPT Interaction Logs in the Wild. ICLR 2024.
+- Zheng, L., et al. LMSYS-Chat-1M: A Large-Scale Real-World LLM Conversation Dataset. ICLR 2024.
+- HealthChat-11K (the dataset's own paper; cite from its Hugging Face page).
+- Statistics: Wilson (1927); McNemar (1947); Benjamini and Hochberg (1995); Mann and Whitney (1947); Efron (1979) for the bootstrap.
