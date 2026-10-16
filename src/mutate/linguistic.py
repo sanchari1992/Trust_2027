@@ -536,3 +536,21 @@ def mutate_linguistic(prompt0, ctx, mc, rng, fixed_ops=None):
     if problems or not applied:
         return {"ok": False, "reason": ",".join(problems) or "no_operator_changed_the_text"}
     return {"ok": True, "prompt": prompt, "operators": applied, "info": info}
+
+
+RULE_BASED_OPS = ("casual", "typos", "first_person", "politeness", "imperative")
+
+
+def fallback_linguistic(prompt0, ctx, mc, rng):
+    """Last resort (mutation.fill_all): try the rule-based operators ONE at a time, in random order, until one
+    changes the text and passes the same surface check. Returns the result of mutate_linguistic or a failure."""
+    order = list(RULE_BASED_OPS)
+    rng.shuffle(order)
+    last = {"ok": False, "reason": "no_rule_based_operator_changed_the_text"}
+    for op in order:
+        r = mutate_linguistic(prompt0, ctx, {**mc, "operators": {op: 1.0}, "n_ops": 1}, rng)
+        if r["ok"]:
+            r["info"] = {**(r.get("info") or {}), "fallback": f"single_operator:{op}"}
+            return r
+        last = r
+    return last

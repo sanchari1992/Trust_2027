@@ -140,7 +140,7 @@ def run(rag_name, method, cfg, dry_run=False, fresh=False):
     if fresh:
         for f in (out_file, rej_file, meta_file):
             f.unlink(missing_ok=True)
-    elif meta_file.exists() and json.loads(meta_file.read_text())["settings_hash"] != current:
+    elif meta_file.exists() and json.loads(meta_file.read_text(encoding="utf-8"))["settings_hash"] != current:
         raise RuntimeError(
             "Settings changed since the last run of this method. Re-run with --fresh to start over "
             "(this deletes the earlier results), or restore the old settings. "
@@ -227,7 +227,7 @@ def run(rag_name, method, cfg, dry_run=False, fresh=False):
         "this_run": {"seconds": round(time.time() - t0, 1),
                      **{k: usage1[k] - usage0[k] for k in usage1}},
     }
-    meta_file.write_text(json.dumps(meta, indent=2))
+    meta_file.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     print(f"Done: {len(accepted)}/{target} questions -> {out_file}")
     print(f"Rejected: {dict(reasons)}")
     print(f"This run: {meta['this_run']}")

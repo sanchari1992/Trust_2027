@@ -14,7 +14,7 @@ import numpy as np
 
 from src.config import corpus_dir, index_dir
 from src.llm import get_chat_func
-from src.rags.base import BaseRAG
+from src.rags.base import BaseRAG, refusal_instruction
 
 SYSTEM_PROMPT = (
     "You are a helpful medical expert, and your task is to answer a medical "
@@ -171,7 +171,7 @@ class MedRagRag(BaseRAG):
         if self._chat is None:
             self._chat = get_chat_func(self.cfg)
         answer = self._chat(
-            SYSTEM_PROMPT,
+            SYSTEM_PROMPT + refusal_instruction(self.cfg),
             f"Here are the relevant documents:\n{context}\n\n"
             f"Here is the question:\n{question}\n\nAnswer:",
         )

@@ -1,5 +1,33 @@
 """The shared shape every RAG in this project follows."""
+import re
 from concurrent.futures import ThreadPoolExecutor
+
+# What the RAG must answer when its documents do not contain what the question needs (README section 14.10).
+# One place for the wording: the RAG prompt, the judge and the counts all read it from here / from the config.
+DEFAULT_REFUSAL = "Cannot be answered from given information."
+
+
+def refusal_phrase(cfg):
+    return ((cfg or {}).get("medrag") or {}).get("refusal_phrase") or DEFAULT_REFUSAL
+
+
+def refusal_instruction(cfg):
+    """Sentence added to the RAG's system prompt ("" when medrag.refusal_instruction is false)."""
+    if not ((cfg or {}).get("medrag") or {}).get("refusal_instruction", True):
+        return ""
+    return (" If the documents do not contain the information needed to answer the question, do not guess and do "
+            f'not use outside knowledge: reply with exactly "{refusal_phrase(cfg)}" and nothing else.')
+
+
+def _norm(t):
+    return re.sub(r"[^a-z0-9 ]+", "", re.sub(r"\s+", " ", str(t or "").lower())).strip()
+
+
+def is_refusal(text, phrase=DEFAULT_REFUSAL):
+    """True when the answer IS the refusal phrase: the phrase, ignoring case, quotes and final punctuation, with at
+    most a few extra words around it. An answer that contains the phrase inside a longer answer is not counted."""
+    t, ph = _norm(text), _norm(phrase)
+    return bool(t) and ph in t and len(t) <= len(ph) + 40
 
 
 class BaseRAG:

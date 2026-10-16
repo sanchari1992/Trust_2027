@@ -10,13 +10,18 @@
 STEPS, in order:
     corpora   download the corpora                      scripts/prepare_corpora.py
     indexes   build each RAG's index (slow, LLM calls)  scripts/build_indexes.py
+    real      download real user queries (skipped if present) scripts/prepare_real_queries.py (medical for medrag, general for the others)
     generate  generate benchmark questions              scripts/generate_benchmark.py   (RAGAS, ARES, DataMorgana)
+    union     union of the methods' questions (no LLM)  scripts/build_union.py
+    db        entity + graph-template databases         scripts/create_bench.py   (real queries, and each RAG's benchmark)
     stats     corpus sizes -> results/corpus_stats.*    scripts/corpus_stats.py
     mutate    create Benchmark+ (mutations 1, 2, 3)     scripts/mutate_benchmark.py
     evaluate  run every condition on the RAGs + judge   scripts/evaluate_benchmarks.py   (baseline, m1, m2, m3 + 2 controls)
     analyze   tables, tests and figure                  scripts/analyze_eval.py
     audit     why mutated questions count as hallucinations scripts/audit_hallucinations.py
     compare   are mutated questions closer to real ones? scripts/compare_mutations.py (needs the real queries of section 11)
+    report    THE paper report: real vs methods vs union vs mutations vs hallucinations   scripts/paper_report.py
+    examples  example prompts, entities, graph templates and mutations for the paper     scripts/paper_examples.py
 
 Every step is safe to re-run: finished work is skipped and interrupted work resumes.
 If a step fails the run stops and prints how to continue (your same flags + --from-step <step>).
@@ -25,6 +30,8 @@ evaluation results and start over (needed after you change mutation settings). I
 generated benchmark questions.
 --dry-run: generate / mutate / evaluate run in their own dry-run mode (plan and LLM-call estimate,
 no LLM calls); the other steps just print what they would run.
+--mutate-n N / --eval-n N: questions per file for the mutate step / for the evaluate step (the evaluation samples
+from the mutated questions, so mutate at least as many as you evaluate). --limit sets both.
 """
 import argparse
 import os
@@ -37,9 +44,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.benchgen.runner import METHODS  # noqa: E402
+from src.config import ROOT as _ROOT, load_config  # noqa: E402
 from src.rags.registry import RAG_NAMES  # noqa: E402
 
-STEPS = ["corpora", "indexes", "generate", "stats", "mutate", "evaluate", "analyze", "audit", "compare"]
+STEPS = ["corpora", "indexes", "real", "generate", "union", "db", "stats", "mutate", "evaluate", "analyze", "audit",
+         "compare", "report", "examples"]
 DRY_RUN_CAPABLE = {"generate", "mutate", "evaluate"}
 
 
@@ -62,21 +71,48 @@ def commands(step, rags, methods, a):
         return [[py, S("prepare_corpora.py"), r] for r in rags]
     if step == "indexes":
         return [[py, S("build_indexes.py"), *rags]]
+    if step == "real":
+        cfg = load_config(profile=a.profile)
+        domains = (["medical"] if "medrag" in rags else []) + (["general"] if set(rags) - {"medrag"} else [])
+        todo = []
+        for d in domains:
+            f = _ROOT / cfg["real_queries"]["output_dir"] / f"{d}.jsonl"
+            if f.exists():
+                print(f"real queries '{d}' already at {f}: skipped")
+            else:
+                todo.append([py, S("prepare_real_queries.py"), d])
+        return todo
+    if step == "union":
+        return [[py, S("build_union.py"), "--rags", ",".join(rags), "--methods", ",".join(methods)]]
+    if step == "db":
+        cfg = load_config(profile=a.profile)
+        out = []
+        for d in (["medical"] if "medrag" in rags else []) + (["general"] if set(rags) - {"medrag"} else []):
+            if (_ROOT / cfg["real_queries"]["output_dir"] / f"{d}.jsonl").exists():
+                out.append([py, S("create_bench.py"), "--real", d])
+        out += [[py, S("create_bench.py"), "--from-run", r, "--methods", ",".join(methods), "--overwrite"] for r in rags]
+        return out
     if step == "generate":
         return [[py, S("generate_benchmark.py"), r, m] + (["--n", str(a.n)] if a.n else []) for r, m in pairs]
     if step == "stats":
         return [[py, S("corpus_stats.py"), "--save"]]
     fresh = ["--fresh"] if a.fresh else []
     if step == "mutate":
-        return [[py, S("mutate_benchmark.py"), r, m] + (["--limit", str(a.limit)] if a.limit else []) + fresh for r, m in pairs]
+        n = a.mutate_n or a.limit
+        return [[py, S("mutate_benchmark.py"), r, m] + (["--limit", str(n)] if n else []) + fresh for r, m in pairs]
     if step == "evaluate":
-        return [[py, S("evaluate_benchmarks.py"), r, m] + (["--limit", str(a.limit)] if a.limit else []) + fresh for r, m in pairs]
+        n = a.eval_n or a.limit
+        return [[py, S("evaluate_benchmarks.py"), r, m] + (["--limit", str(n)] if n else []) + fresh for r, m in pairs]
     if step == "analyze":
         return [[py, S("analyze_eval.py")]]
     if step == "audit":
         return [[py, S("audit_hallucinations.py")]]
     if step == "compare":
         return [[py, S("compare_mutations.py")] + (["--limit", str(a.limit)] if a.limit else [])]
+    if step == "report":
+        return [[py, S("paper_report.py"), "--rags", ",".join(rags), "--methods", ",".join(methods)]]
+    if step == "examples":
+        return [[py, S("paper_examples.py"), "--rags", ",".join(rags), "--methods", ",".join(methods)]]
     raise ValueError(step)
 
 
@@ -90,6 +126,8 @@ def main():
     ap.add_argument("--skip", default="", help="comma-separated steps to leave out")
     ap.add_argument("--n", type=int, default=None, help="questions per (rag, method) for the generate step")
     ap.add_argument("--limit", type=int, default=None, help="questions per file for mutate / evaluate / compare (quick trials)")
+    ap.add_argument("--mutate-n", type=int, default=None, help="questions per file in the mutate step (default: --limit)")
+    ap.add_argument("--eval-n", type=int, default=None, help="questions per file in the evaluate step (default: --limit)")
     ap.add_argument("--fresh", action="store_true",
                     help="mutate and evaluate steps: discard earlier results and start over (never touches generated questions)")
     ap.add_argument("--dry-run", action="store_true")
@@ -111,6 +149,7 @@ def main():
         sys.exit(f"Unknown step(s) {bad}. Choose from {STEPS}")
 
     env = os.environ.copy()
+    env.setdefault("PYTHONUTF8", "1")  # Windows: read and write text files as UTF-8 (medical text has symbols such as β)
     if a.profile:
         env["BP_PROFILE"] = a.profile
     print(f"profile: {a.profile or env.get('BP_PROFILE') or 'default'} | rags: {rags} | methods: {methods}")

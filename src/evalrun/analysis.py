@@ -10,19 +10,21 @@ from scipy import stats
 from src.analysis.compare import _benjamini_hochberg
 from src.benchgen.common import read_jsonl
 from src.config import ROOT
+from src.rags.base import is_refusal, refusal_phrase
 from src.mutate.common import (ALL_CONDITIONS as CONDITIONS, CONDITION_LABELS, CONTROL_CONDITIONS,
                                DERIVED_CONDITIONS, active_conditions)
 
 METRICS = {"hallucinated": "Hallucination rate", "failed": "Failure rate (not correct)",
            "wrong_behavior": "Wrong-behaviour rate (asserted something wrong or adopted a false/unsupported claim)",
            "hallucinated_strict": "Hallucination rate, strict (user message NOT counted as context)",
+           "refused": "Refusal rate (answered 'Cannot be answered from given information.')",
            "unsupported_but_correct": "Unfaithful but judged correct (statements beyond the retrieved text, answer right)",
            "unfaithful_and_wrong": "Unfaithful AND judged not correct",
            "retrieval_miss": "Retrieval miss (no original source passage among the retrieved ones)"}
 
 
 # ------------------------------------------------------------------ loading
-UNION_MAX = ["hallucinated", "failed", "unfaithful", "abstained", "wrong_behavior", "hallucinated_strict",
+UNION_MAX = ["hallucinated", "failed", "unfaithful", "abstained", "refused", "wrong_behavior", "hallucinated_strict",
              "unfaithful_strict", "unsupported_but_correct", "unfaithful_and_wrong", "retrieval_miss"]
 UNION_MIN = ["faithfulness", "faithfulness_strict", "retrieval_hit", "gold_recall"]
 UNION_PARTS = ["baseline", "m1", "m2", "m3"]
@@ -71,8 +73,8 @@ def load_results(cfg):
                 "faithfulness", "label", "kind", "operators"):
         if col not in df.columns:
             df[col] = None
-    for col in ("wrong_behavior", "hallucinated_strict", "unfaithful_strict"):
-        if col not in df.columns:
+    for col in ("wrong_behavior", "hallucinated_strict", "unfaithful_strict", "refused"):
+        if col not in df.columns:  # results written before the refusal phrase existed
             df[col] = np.nan
     df["valid"] = df["hallucinated"].notna() & df["rag_error"].isna()
     n_bad = int((~df["valid"]).sum())
@@ -87,6 +89,11 @@ def load_results(cfg):
     for col in ("wrong_behavior", "hallucinated_strict", "unfaithful_strict"):
         df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
     df["abstained"] = df["abstained"].astype(float)
+    df["refused"] = pd.to_numeric(df["refused"], errors="coerce").astype(float)
+    miss = df["refused"].isna()
+    if miss.any() and "response" in df.columns:  # results written before the refusal phrase existed: read it off the stored response
+        ph = refusal_phrase(cfg)
+        df.loc[miss, "refused"] = df.loc[miss, "response"].map(lambda t: float(is_refusal(t, ph)))
     df["unsupported_but_correct"] = df["unfaithful"] * (1.0 - df["failed"])
     df["unfaithful_and_wrong"] = df["unfaithful"] * df["failed"]
     df["retrieval_miss"] = 1.0 - df["retrieval_hit"]
@@ -142,7 +149,8 @@ def summary_table(df):
                         "unsupported_but_correct_rate": g["unsupported_but_correct"].mean(),
                         "unfaithful_and_wrong_rate": g["unfaithful_and_wrong"].mean(),
                         "retrieval_hit_rate": g["retrieval_hit"].mean(),
-                        "abstain_rate": g["abstained"].mean(), "mean_faithfulness": g["faithfulness"].astype(float).mean()})
+                        "abstain_rate": g["abstained"].mean(), "refusal_rate": g["refused"].mean(),
+                        "mean_faithfulness": g["faithfulness"].astype(float).mean()})
     return pd.DataFrame(out)
 
 
@@ -155,6 +163,8 @@ def paired_table(df, n_boot, seed):
     rng = np.random.default_rng(seed)
     rows = []
     for metric in METRICS:
+        if metric not in df.columns or df[metric].notna().sum() == 0:
+            continue
         wide = _wide(df, metric)
         if "baseline" not in wide:
             continue

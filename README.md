@@ -10,7 +10,9 @@ Code for a study of RAG benchmarks: do benchmarks made by RAGAS, ARES and DataMo
 
 All language-model calls go to DeepSeek; all embeddings run locally. DSRS compression is not in this repository yet.
 
-**How this README is organised.** Sections 1 to 17 (Part A) say how to run and configure everything. Sections 18 to 28 (Part B, "Paper companion") give the study design, definitions, formulas, statistics, evidence, limitations and a map from the outputs to the sections of a paper.
+6. **A benchmark database** (named entities + graph templates), a **prompt generator** for testers, the **union** of the three methods and a **paper report**: sections 29 to 33. A command cheat sheet is in `COMMANDS.md`.
+
+**How this README is organised.** Sections 1 to 17 (Part A) say how to run and configure everything. Sections 18 to 28 (Part B, "Paper companion") give the study design, definitions, formulas, statistics, evidence, limitations and a map from the outputs to the sections of a paper. Sections 29 to 33 (Part C) describe the benchmark database, prompt generation, the union and the paper pipeline.
 
 ---
 
@@ -72,6 +74,11 @@ benchmark-plus/
 │   ├── transition_report.py     which questions are fine/failing in the benchmark and in a mutated version   section 14.8
 │   ├── plot_transitions.py      figure + table: which mutation breaks, fixes, is consistent               section 14.9
 │   ├── compare_mutations.py     are mutated questions closer to real ones?     section 14.5
+│   ├── create_bench.py          prompts + responses -> database of named entities and graph templates   section 29
+│   ├── gen_bench.py             database -> generated (mutated) test prompts, tunable                    section 30
+│   ├── build_union.py           union of RAGAS, ARES and DataMorgana questions                          section 31
+│   ├── paper_report.py          the whole evaluation story in one report + LaTeX tables                 section 32
+│   ├── paper_examples.py        example queries, entities, graph templates, mutations for the paper     section 32.4
 │   └── run_all.py               the whole pipeline in order                    section 15
 ├── src/
 │   ├── config.py                reads config.yaml (+ profiles), builds folder names
@@ -82,6 +89,7 @@ benchmark-plus/
 │   │   └── lightrag_rag.py, raptor_rag.py, medrag_rag.py
 │   ├── benchgen/                the benchmark generators (ragas_gen, ares_gen, datamorgana_gen, runner, common)
 │   ├── analysis/                graph + lexical features, real-vs-generated comparison
+│   ├── benchdb/                 entity + graph-template analysis (analyze.py), the database (store.py), readers, union, prompt generation (generate.py), metrics, report helpers
 │   ├── mutate/                  the three mutations: length.py, linguistic.py, userinfo.py, verify.py, runner.py
 │   └── evalrun/                 judge.py (faithfulness, correctness), runner.py (also resumes and drops stale results), controls.py (control conditions, retrieval check), analysis.py, before_after.py, audit.py
 │
@@ -95,7 +103,9 @@ benchmark-plus/
     ├── benchmarks/<rag>_<tag>/  generated questions   (benchmarks_large/ for the large profile)
     ├── mutations/               mutation1_length/ mutation2_linguistic/ mutation3_userinfo/ (mutation123_combined/ only if mutation.generate_combined is true)
     ├── eval/                    per-question results; _report/ holds the analysis
-    └── analysis/                real-vs-generated comparisons
+    ├── analysis/                real-vs-generated comparisons
+    ├── benchdb/                 <name>.benchmark databases (benchmark_paper / benchdb_paper / paper_final with the paper profile)
+    └── paper/                   paper_report.md, paper_tables.tex, paper_examples.*, audit sheet
 ```
 
 `<tag>` describes the corpus and its size, for example `lightrag_mix_10` (UltraDomain "mix", 10 documents), `raptor_quality_dev_10` or `medrag_textbooks_3`. When a size setting is `null`, the tag says `all` instead of a number. Different corpus settings therefore get different folders automatically.
@@ -165,6 +175,8 @@ The defaults below are read from `config.yaml` when this README is generated.
 | `llm.api_key_env` | `DEEPSEEK_API_KEY` | The NAME of the variable in your `.env` file that holds the API key (not the key itself). |
 | `llm.thinking` | `disabled` | DeepSeek's newer models "think" before answering by default, which is slower, costlier and changes the response format. `disabled` switches that off; `enabled` turns it back on. |
 | `llm.temperature` | `0.0` | Randomness of the LLM calls made while building indexes and answering questions (0 = as repeatable as possible). Benchmark generation has its own `benchmark.temperature`. |
+| `llm.cache` | `true` | Cache the deterministic calls (those that ask for temperature 0: the judge and the mutation checks) on disk, so a resumed, repeated or `--fresh` run does not pay for them again. RAG answers and every call that writes text are never cached. Section 14.11. |
+| `llm.cache_path` | `results/llm_cache.sqlite` | Where the cache lives. Delete the file to start empty; it is safe to share between runs, because the key contains the model and the exact prompt. |
 
 ### 4.2 `embedding`: the local embedding model
 
@@ -427,7 +439,7 @@ Extra fields: LightRAG adds `graph_entities` and `graph_relationships`; RAPTOR a
 - **Embeddings:** local `bge-small-en-v1.5` instead of OpenAI embeddings. Where LightRAG or RAPTOR used OpenAI embeddings, results are not an exact reproduction.
 - **LightRAG:** smaller chunks (`chunk_token_size`) than LightRAG's default so they fit the embedding model.
 - **RAPTOR:** the paper builds one tree per document; here all documents of the corpus go into one tree, so a question can be answered from any document.
-- **MedRAG:** a re-implementation of its pipeline (same Textbooks corpus, MedCPT retriever, k = 32, prompt adapted from MedRAG's), not a call into its released code, which pins old library versions.
+- **MedRAG:** a re-implementation of its pipeline (same Textbooks corpus, MedCPT retriever, k = 32, prompt adapted from MedRAG's plus one sentence that tells the model to answer exactly "Cannot be answered from given information." when the documents lack the information, section 14.10), not a call into its released code, which pins old library versions.
 - **RAGAS:** only the two prompts described in the RAGAs paper are used. The newer test-set generator of the `ragas` software library is a different method and is not used.
 - **ARES:** the round-trip filter uses a local embedding model with exact search instead of OpenAI embeddings. The few-shot examples in `configs/` are generic or medical examples written for this project, not in-domain human-written ones. Weak answer negatives (an answer taken from another question) are not stored; they can be sampled from the finished benchmark. Strong context negatives fall back to embedding neighbours where the paper uses BM25.
 - **DataMorgana:** the paper does not publish its filter prompt or the probabilities of its question categories; the filter prompt is ours and the probabilities are uniform.
@@ -776,6 +788,24 @@ python scripts/mutate_benchmark.py lightrag ragas --fresh        # throw away ea
 - `unsupported_assumption` is judged on whether the passage mentions the detail. A fact the RAG could legitimately know from elsewhere in its corpus is outside A1.
 - The reference answer for adversarial items states the expected *behaviour*; the judge (section 14) compares responses against it with an LLM, which is an approximation.
 
+### 13.12 One mutated question per original (`mutation.fill_all`)
+
+**What used to happen.** A mutation that failed its check was redone up to `mutation.max_retries` times and then dropped. Some benchmarks fail often: ARES writes short keyword-style queries, and in one pilot 23 of 50 Elaborate mutations were dropped. The evaluation uses only questions that exist in **every** condition (baseline, M1, M2, M3, controls), so every dropped mutation also removes the question from the comparison, and a run of 300 questions can end with far fewer to compare.
+
+**What happens now** (`fill_all: true`, the default). A mutation that fails its checks is replaced by a fallback, so every original question gets one version of each mutation:
+
+| Mutation | Fallback | Why it is safe | Marker in the row's `meta.fallback` |
+|---|---|---|---|
+| M1 Elaborate | the question plus ONE content-free answer-style instruction from the fixed list ("Answer as precisely as you can."); no LLM call | the sentence has no domain content, so what is asked and the answer cannot change; no check is needed | `template_only` |
+| M2 Colloquial | one rule-based operator at a time (casual, typos, first_person, politeness, imperative) in random order until one changes the text | the same surface check as always (numbers and negations unchanged, the text changed) | `single_operator:<name>` |
+| M3 Premise | three more rounds with fresh random choices, alternating a correct and an incorrect claim | the same full verification of the claim against the passage | `retry_round_<k>` |
+
+If even the fallbacks fail (rare, only Premise), the mutation is dropped as before and listed in the `.rejected.jsonl` file. The row keeps `meta.first_failure`, the reason the full operator failed.
+
+**Filling the gaps of an earlier run.** Run the mutate step again with the same command (no `--fresh`): questions processed earlier that lack a mutation are tried again, **only** for the missing mutation, and nothing that exists is duplicated or regenerated. Entries that are now filled disappear from the `.rejected.jsonl` file. `fill_all` is not part of the settings hash, so turning it on does not force `--fresh`. Questions never processed before (for example because an earlier run used `--limit 50`) are mutated as usual when you run without `--limit`. Then run the evaluate step again: it evaluates the questions that are now complete.
+
+**Reporting.** The mutate step prints `kept N (of which F by a fallback)`; `mutation_validity.csv` and the report have a `by_fallback` column. Fallback rows are weaker than full operators (an Elaborate fallback adds one short sentence), so say in the paper how many there are and, as a sensitivity check, recompute the main table without the rows whose `meta.fallback` is set. `fill_all: false` restores the old behaviour.
+
 ---
 
 ## 14. Evaluating Benchmark vs Benchmark+
@@ -795,7 +825,7 @@ For one (RAG, method), the **same** questions are answered in several conditions
 | `c_pad` | the original + off-topic filler as long as the M1 addition | control |
 | `m123` | all three mutations in ONE prompt | optional, `evaluation.combined: run` |
 
-Only questions that survived every mutation are eligible, and `evaluation.sample_per_file` (default 500) of them are drawn at random, once, for all conditions. This makes every comparison **paired**: the same question, original versus mutated. An interrupted run resumes at the last saved batch; a stored result is reused only if its question text and reference answer have not changed since it was evaluated (otherwise it is dropped and redone, and the run says how many).
+Only questions that survived every mutation are eligible (with `mutation.fill_all`, section 13.12, almost every question does), and `evaluation.sample_per_file` (default 500) of them are drawn at random, once, for all conditions. This makes every comparison **paired**: the same question, original versus mutated. An interrupted run resumes at the last saved batch; a stored result is reused only if its question text and reference answer have not changed since it was evaluated (otherwise it is dropped and redone, and the run says how many).
 
 ```bash
 python scripts/build_indexes.py                              # once; slow for LightRAG and RAPTOR
@@ -836,7 +866,8 @@ Options of `evaluate_benchmarks.py`: `--conditions baseline,m1,...` (derived con
 | `hallucinated_strict` | the same with the plain faithfulness score (an upper bound) |
 | `unsupported_but_correct` * | unfaithful but judged correct: statements beyond the retrieved text, answer right (often the model's own, true, knowledge) |
 | `unfaithful_and_wrong` * | unfaithful AND not correct: the strongest candidate for a real hallucination |
-| `abstained` | the label is `abstained` |
+| `abstained` | the label is `abstained` (declined, in any words) |
+| `refused` | the answer is exactly the refusal phrase "Cannot be answered from given information." (section 14.10). No judge call; `refused` ⊆ `abstained` |
 | `gold_recall`, `retrieval_hit` | whether the retrieved passages include the original source passage(s) of the question (a gold passage counts if some retrieved text contains at least 60% of its words) |
 
 ### 14.3 Parameters (`evaluation:` in `config.yaml`)
@@ -855,6 +886,7 @@ Options of `evaluate_benchmarks.py`: `--conditions baseline,m1,...` (derived con
 | `evaluation.faithfulness_threshold` | `1.0` | An answer is UNFAITHFUL if its faithfulness score is below this. `1.0` = any unsupported statement counts. |
 | `evaluation.user_message_as_context` | `true` | The user's message supports statements that only repeat it (section 14.2). `false` = plain faithfulness only. |
 | `evaluation.also_strict_faithfulness` | `true` | Also keep the plain score (one extra judge call per answer), so both versions can be reported. |
+| `evaluation.skip_redundant_verdicts` | `true` | The plain (strict) faithfulness check goes first; when it finds every statement supported, the check with the user message is not asked, because adding context cannot remove support. One judge call less for every faithful answer. Only matters with `also_strict_faithfulness`. `false` = always ask both (section 14.11). |
 | `evaluation.max_context_chars` | `60000` | The retrieved context shown to the faithfulness judge is cut at this length. |
 | `evaluation.also_source_faithfulness` | `false` | Also score faithfulness against ORIGINAL source text only (`faithfulness_source`; 1 extra judge call per answer). Useful for RAPTOR, whose context can be LLM-written summaries. |
 | `evaluation.store_contexts` | `false` | Keep the retrieved contexts in every result row (large files). Not needed for the retrieval check, which is computed while evaluating. |
@@ -866,7 +898,7 @@ Per-question results: `<evaluation.output_dir>/<rag>_<tag>/<method>/<condition>.
 
 | Command | Writes (in `<evaluation.output_dir>/_report/`) |
 |---|---|
-| `python scripts/summary_counts.py` | **`summary_counts.md`**, `benchmark_plus.csv`, `benchmark_plus_by_rag_method.csv`, `summary_counts.csv`, `summary_counts_pooled.csv`, `combined_count.csv`. **Table 1, "Benchmark+ as a bigger benchmark"** (section 14.7): Benchmark (N questions), Benchmark + M1 / + M2 / + M3 (2N each: the originals and their mutated versions) and Benchmark + M1 + M2 + M3 (4N), with `questions`, `correct`, `wrong`, `abstained`, `accuracy`, `hallucinated`, `hallucination_rate` and an interval, `hallucinated_in_added` (only the added mutated rows), and the same split of hallucination. **Then, per single condition**: for each condition `total`, `correct`, `wrong`, `abstained`, `accuracy` (= correct / total), `hallucinated`, `hallucination_rate`, `wrong_behavior`, `unsupported_but_correct`, `retrieval_hit_rate`, and, against the same question in the unchanged benchmark, `newly_failed`, `newly_fixed`, `failed_in_both` (the same hard questions fail whatever you do), `net_failed`. Pooled and per RAG x method. A second table, "Combined count, step by step", gives benchmark + new failures of M1 + M2 + M3 (section 14.6). |
+| `python scripts/summary_counts.py` | **`summary_counts.md`**, `benchmark_plus.csv`, `benchmark_plus_by_rag_method.csv`, `summary_counts.csv`, `summary_counts_pooled.csv`, `combined_count.csv`. **Table 1, "Benchmark+ as a bigger benchmark"** (section 14.7): Benchmark (N questions), Benchmark + M1 / + M2 / + M3 (2N each: the originals and their mutated versions) and Benchmark + M1 + M2 + M3 (4N), with `questions`, `correct`, `wrong`, `abstained`, `accuracy`, `hallucinated`, `hallucination_rate` and an interval, `hallucinated_in_added` (only the added mutated rows), and the same split of hallucination. **Then, per single condition**: for each condition `total`, `correct`, `wrong`, `abstained`, `accuracy` (= correct / total), `hallucinated`, `hallucination_rate`, `wrong_behavior`, `unsupported_but_correct`, `retrieval_hit_rate`, and, against the same question in the unchanged benchmark, `newly_failed`, `newly_fixed`, `failed_in_both` (the same hard questions fail whatever you do), `net_failed`. Pooled and per RAG x method. A second table, "Combined count, step by step", gives benchmark + new failures of M1 + M2 + M3 (section 14.6). Every table also has a **`refused`** count (answers that are exactly "Cannot be answered from given information."), and a **Refusals** table (also `refusals.csv`) with `refused`, `refused_rate`, `abstained_by_judge`, `became_refused`, `stopped_refusing` and `refused_in_both` per condition (section 14.10). |
 | `python scripts/analyze_eval.py` | `report.md` (the main tables), `summary_by_condition.csv`, `paired_vs_baseline.csv`, `coverage.csv`, `by_operator.csv`, `m3_breakdown.csv`, `label_distribution.csv`, `retrieval.csv`, `hallucination_by_condition.png`, `results_grid.md/.csv/.tex`, `before_after.md`, `before_after_summary.csv`, `before_after_deltas.csv` (details below) |
 | `python scripts/audit_hallucinations.py` | `audit_newly_failing.md` / `.csv` (section 16) |
 
@@ -957,6 +989,71 @@ One figure per outcome (`transitions_<outcome>.png` and `.pdf`, in `<evaluation.
 
 `transition_summary.md` and `transition_summary_<outcome>.csv` hold the numbers behind panel A (`newly_failing`, `fixed`, `failing_in_both`, `fine_in_both`, `net_change`, `flip_rate` = share of questions that change status in either direction) and, for each mutation, how much of its newly failing set is unique to it (`newly_failing_unique_to_it`, `share_unique`) versus shared with another mutation. Needs `baseline`, `m1`, `m2` and `m3` in the results.
 
+### 14.10 Refusals: "Cannot be answered from given information."
+
+**Why.** Real patients write with a profile: *"I am 62, I take warfarin, I have kidney disease. Can I take ibuprofen?"* A benchmark question written from one textbook passage may be answerable on its own and stop being answerable once the profile is added (the textbooks say nothing about this patient). A RAG that answers anyway is guessing; a RAG that says so is behaving correctly. M3 (Premise) adds exactly this kind of information, so the paper needs to know how often the RAG says it cannot answer, for the original benchmark and for each mutated version.
+
+**What the RAG is told.** The MedRAG system prompt (`src/rags/medrag_rag.py`) gets one extra sentence (built by `refusal_instruction` in `src/rags/base.py`): *if the documents do not contain the information needed to answer the question, do not guess and do not use outside knowledge: reply with exactly "Cannot be answered from given information." and nothing else.* Settings in `config.yaml` under `medrag:`:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `refusal_instruction` | `true` | add the sentence. `false` = the original MedRAG prompt (then `refused` stays near 0 and declines are found only by the judge) |
+| `refusal_phrase` | `Cannot be answered from given information.` | the exact answer. The judge and every count read the same string, so change it only here |
+
+Only the MedRAG prompt has this sentence: the paper is medical, and LightRAG and RAPTOR keep their prompts. **Changing the prompt changes the answers**, so evaluation results written before this change are not comparable with new ones. Re-run the evaluation (`--fresh`, or a new `evaluation.output_dir`) instead of mixing them.
+
+**How it is counted** (`src/evalrun/judge.py`, `src/rags/base.py`). An answer is `refused` when, ignoring case, quotes and final punctuation, it is the phrase with at most a few extra words around it; the phrase inside a longer real answer does not count. A refused answer needs no judge call: its label is `abstained` (`flagged` for an M3 unsupported detail, where saying "not available" is the correct behaviour), faithfulness is vacuously 1, it is a failure for an answerable question and never a hallucination. `abstained` is wider than `refused`: it also contains declines the judge recognises in other words, so `refused` ≤ `abstained`. Results written before this change have no `refused` column; the analysis reads it off the stored response.
+
+**Where the counts appear.**
+
+| Where | What |
+|---|---|
+| `summary_counts.py`: every table | a `refused` count next to `abstained` (Benchmark+ table, per-condition table, the combined count) |
+| `summary_counts.py`: Refusals table, `refusals.csv` | per condition: `total`, `refused`, `refused_rate`, `abstained_by_judge`, and against the same question in the unchanged benchmark `became_refused` (answered the original, refuses this version: for M3 the patient information made it unanswerable), `stopped_refusing`, `refused_in_both` (the documents never held the answer) |
+| `analyze_eval.py` | `refusal_rate` in `summary_by_condition.csv`, and a paired test with interval for the `refused` metric in `paired_vs_baseline.csv` (diff against the benchmark, McNemar, q-value) |
+| `before_after.md` | a `refused` column in the outcome table, and `refusal_rate` with its paired change in `before_after_deltas.csv` |
+| `paper_report.py` | `refused` in the Benchmark+ table, the paired table, the section "Refusals" (union) in `paper_report.md`, `refusals.csv` (all methods), and `refusals` in `paper_numbers.json` |
+| `paper_examples.py`, part E (section 32.4) | the counts per method and condition, original questions the RAG refuses, and mutated questions it refuses although it answered the original; `refusal_counts_<rag>.csv` and a LaTeX table |
+
+**Reading the numbers.** A high `refused_in_both` says the benchmark contains questions its own corpus cannot answer (a generator or retrieval problem, not a mutation effect). A high `became_refused` under M3 is the expected effect of patient information; under M1 or M2 it means a rewording or padding made the retriever lose the passage, which is worth a look at `retrieval_hit_rate`. Do not read a refusal as safe by itself: a refusal on a question whose reference passage was retrieved is a missed answer. Compare `refused` with `retrieval_hit_rate` and with the accuracy of the answered questions.
+
+### 14.11 Cost: where the API calls go, and how to cut them
+
+Every run prints its calls (`This run: {...}` for mutation; `API calls in this run` for evaluation, with `cache_hits`), and `--dry-run` prints the plan before anything is spent. Calls per unit of work:
+
+| Stage | Unit | Calls | Notes |
+|---|---|---|---|
+| Generation (`generate_benchmark.py`) | one attempt | RAGAS 2, ARES 2 (1 if the round-trip filter rejects the query before the answer is written), DataMorgana 2 (generate + filter) | divide by the acceptance rate to get calls per kept question |
+| Mutation (`mutate_benchmark.py`) | one benchmark question | about 5: Elaborate 2 to 3 (write + check), Colloquial 1 (+1 for the synonym check), Premise about 3 (write + check) | a failed check is redone up to `mutation.max_retries` times |
+| Evaluation (`evaluate_benchmarks.py`) | one answer | RAG 1; judge: label 1 (0 for a refusal), statements 1, faithfulness checks 1 or 2 | x 6 conditions per question (baseline, M1, M2, M3, `c_rerun`, `c_pad`) |
+
+**Savings that change nothing you report** (on by default):
+
+| What | How much | Why it is safe |
+|---|---|---|
+| Disk cache of temperature-0 calls (`llm.cache`) | a resumed, repeated or `--fresh` run pays nothing for judge and check calls it has already made; judging `c_rerun` is mostly free, because the RAG usually repeats its own answer and the judge prompt is then identical | the key is the model plus the exact prompt; the RAG's answers and all calls that write text are never cached, so `c_rerun` still asks the RAG again |
+| Strict check first (`evaluation.skip_redundant_verdicts`) | one judge call less for every faithful answer | the check with the user message adds context, which can only add support; the two scores differ only when the judge contradicts itself |
+| Refusals need no judge call | 3 to 4 calls per refused answer | section 14.10 |
+
+Together these cut a first evaluation by roughly a fifth to a quarter (an estimate: it depends on how many answers are faithful, and on how often the RAG repeats itself in `c_rerun`); `cache_hits` in the run summary is the exact saving on a repeat run.
+
+**Savings that change what you measure** (off by default; each is one line in `config.yaml`):
+
+| Setting | Saves | What you lose |
+|---|---|---|
+| `--eval-n` / `evaluation.sample_per_file` | evaluation cost is linear in it | statistical power. 500 to 1000 questions per method is usually enough for effects of a few points |
+| `--mutate-n` / `mutation.max_items_per_file` | mutation cost is linear in it | the mutated questions available to evaluate; it need not exceed `--eval-n` by much (only questions valid in every condition are sampled) |
+| `evaluation.conditions` without `c_pad` | 1 of 6 conditions (about 17% of evaluation) | the check that the effect is not just longer text |
+| `evaluation.conditions` without `c_rerun` | 1 RAG call per question, plus its judge calls unless cached | the noise floor of the RAG itself |
+| `benchmark.datamorgana.filter: false` | 1 call per DataMorgana attempt | the paper's quality filter |
+| `mutation.linguistic.synonym_llm_check: false` | 1 call per question that uses synonyms | wrong-sense swaps get through |
+| `mutation.length.verify: false` | 1 check per Elaborate | the guarantee that Elaborate kept the question and its answer (not recommended) |
+| `mutation.max_retries: 1` | fewer regenerations | slightly fewer kept mutations |
+| `evaluation.also_strict_faithfulness: false` | the strict check on unfaithful answers | `hallucinated_strict`, the upper bound |
+| `evaluation.judge_llm` set to a cheaper model | price per judge call | the judge changes; re-judge everything with the same model |
+
+The cheapest way to spend less overall is order, not settings: run the **pilot** first (`bash run_paper.sh --pilot`), read its examples and counts, and only then start the paper run; use `--limit`/`--n` for every trial; and never mix a changed prompt with old results in the same folder (re-judging is then wasted).
+
 ---
 
 ## 15. Running everything: `scripts/run_all.py`
@@ -975,19 +1072,24 @@ python scripts/run_all.py --rags medrag --methods ragas --limit 400 --from-step 
 |---|---|---|---|
 | 1 | `corpora` | `prepare_corpora.py` | downloads |
 | 2 | `indexes` | `build_indexes.py` | many LLM calls for LightRAG and RAPTOR; local for MedRAG |
+| 2b | `real` | `prepare_real_queries.py` (skipped if the file exists) | downloads |
 | 3 | `generate` | `generate_benchmark.py` for each RAG x method | about 2-4 LLM calls per question, more with rejections |
+| 3b | `union` | `build_union.py` | free (local embeddings) |
+| 3c | `db` | `create_bench.py --real ...` and `--from-run ...` | free (spaCy) |
 | 4 | `stats` | `corpus_stats.py --save` | free |
 | 5 | `mutate` | `mutate_benchmark.py` | about 5 LLM calls per question (M3 naturalizing adds one; M2 adds one only for questions that use `synonyms`) |
 | 6 | `evaluate` | `evaluate_benchmarks.py` | about 6 LLM calls per answer, 6 conditions by default (baseline, m1, m2, m3 and the two controls) |
 | 7 | `analyze` | `analyze_eval.py` | free |
 | 8 | `audit` | `audit_hallucinations.py` | free |
 | 9 | `compare` | `compare_mutations.py` | free (needs the real queries) |
+| 10 | `report` | `paper_report.py` | free |
+| 11 | `examples` | `paper_examples.py` | free |
 
 `summary_counts.py` is not a step of `run_all.py`; run it after `analyze`.
 
 Every step is safe to re-run (finished work is skipped, interrupted work resumes). If a step fails, the run stops and prints the command to continue, with all the flags you gave plus `--from-step <step>`. `--dry-run` executes `generate`, `mutate` and `evaluate` in their own dry-run mode (plan and LLM-call estimate, nothing spent) and only prints the other steps.
 
-Options: `--profile`, `--rags`, `--methods` (comma-separated), `--steps`, `--from-step`, `--skip`, `--n` (questions per RAG x method in `generate`), `--limit` (questions per file in `mutate`, `evaluate`, `compare`), `--fresh` (in `mutate` and `evaluate` only: discard their earlier results and start over; needed after changing mutation settings; never deletes the generated questions), `--dry-run`.
+Options: `--profile`, `--rags`, `--methods` (comma-separated), `--steps`, `--from-step`, `--skip`, `--n` (questions per RAG x method in `generate`), `--limit` (questions per file in `mutate`, `evaluate`, `compare`), `--mutate-n` / `--eval-n` (the same for `mutate` / `evaluate` only: evaluation samples from the mutated questions, so mutate at least as many as you evaluate), `--fresh` (in `mutate` and `evaluate` only: discard their earlier results and start over; needed after changing mutation settings; never deletes the generated questions), `--dry-run`.
 
 **A sensible order for a first run:** (1) `--profile large --dry-run`; (2) a slice with `--rags medrag --methods ragas --limit 20` to read the questions, mutated questions and judge labels with your own eyes; (3) a few hundred questions per cell (20 is too few to separate an effect from noise); (4) the full large run. Evaluation, not generation, is where most LLM calls go.
 
@@ -1184,7 +1286,8 @@ Cost: about 6 LLM calls per answer (answer generation inside the RAG varies by R
 | `hallucinated_strict` | the same with the strict score; an upper bound |
 | `unfaithful_and_wrong` | unfaithful AND failing: the strongest candidate for a real hallucination |
 | `unsupported_but_correct` | unfaithful but judged correct: beyond the retrieved text, answer right (often the model's own true knowledge) |
-| `abstained` | label `abstained` |
+| `abstained` | label `abstained` (declined, in any words) |
+| `refused` | the answer is exactly "Cannot be answered from given information." (README 14.10); `refused` ⊆ `abstained` |
 | `retrieval_hit`, `gold_recall` | the source passage was among the retrieved texts (a gold passage counts if one retrieved text contains at least 60% of its words) |
 
 **Hallucination tiers:** A strict (`wrong_behavior` or `unfaithful_and_wrong`), B main (`hallucinated`), C upper bound (`hallucinated_strict`). Report B, show A beside it, label C an upper bound (section 17).
@@ -1350,3 +1453,185 @@ One cell only: MedRAG x RAGAS, 290 questions, DeepSeek as generator, answerer an
 - Zheng, L., et al. LMSYS-Chat-1M: A Large-Scale Real-World LLM Conversation Dataset. ICLR 2024.
 - HealthChat-11K (the dataset's own paper; cite from its Hugging Face page).
 - Statistics: Wilson (1927); McNemar (1947); Benjamini and Hochberg (1995); Mann and Whitney (1947); Efron (1979) for the bootstrap.
+
+---
+---
+
+# Part C. Benchmark database, prompt generation and the paper pipeline
+
+## 29. The benchmark database: named entities and graph templates (`scripts/create_bench.py`)
+
+**Purpose.** Benchmark creators (doctors, domain experts) have questions and answers. This step turns them into a database that records *what the prompts are about* (named entities) and *how they are built* (graph templates), so that testers can later generate new prompts from it (section 30) and so that benchmarks can be compared with real queries by structure, not only by length and wording.
+
+```
+questions.csv  ──create_bench──►  medical.benchmark/        examples.csv ──create_bench --add_graphs──► (same database)
+(+ answers,                         entities.sqlite   prompts, answers, passages, named entities
+ passages)                          graphs.sqlite     one graph + template per prompt and per answer, template library
+                                    manifest.json
+```
+
+```bash
+python scripts/create_bench.py --in_file questions.csv --out medical.benchmark     # step 1
+python scripts/create_bench.py --in medical.benchmark --add_graphs examples.csv    # step 2 (optional)
+python scripts/create_bench.py --real medical                                      # real user queries as a database
+python scripts/create_bench.py --from-run medrag                                   # the benchmark this repository generated (all methods)
+python scripts/create_bench.py --info medical.benchmark
+python scripts/create_bench.py --in medical.benchmark --export                     # entities.csv, graphs.jsonl, templates.csv
+```
+
+**Input.** A `.csv`, `.tsv`, `.json` or `.jsonl` file. One column holds the prompt (`question`, `prompt`, `query` or `text`); optional columns: the answer (`answer`, `response`, `reference_answer`), the source passage (`context`, `passage`, `document`) and `id`. Other names: `--question-col`, `--answer-col`, `--context-col`, `--id-col`. `--kind` says what the prompts are: `benchmark` (default), `real` (real user queries, no answers), `example` (what `--add_graphs` stores). A database that exists is extended (prompts already in it are skipped); `--overwrite` starts over.
+
+**What is stored.**
+
+| Table / file | Content |
+|---|---|
+| `items` | each prompt with its kind, answer, passages, source RAG / method |
+| `entities` | for every prompt, answer (and, once per passage, passage): the entity text, a normalised form, its type and whether it is a spaCy **named entity** (`ner`: PERSON, ORG, GPE, DATE, ...) or a **concept** (`CONCEPT`: a noun phrase that is not a named entity). General spaCy models know little medical vocabulary, so for a medical corpus the concepts carry most of the information; a biomedical model (`benchdb.spacy_model`, for example scispaCy's `en_core_sci_md`) finds more named entities |
+| `graphs` | the dependency graph of every prompt and every answer (node-link JSON), its **template**, **shape**, **text template**, entity slots and the 25 realism features |
+| `template_library` | every distinct template with how many benchmark / real / example prompts use it and an example |
+
+**Graph, template, shape** (computed by `src/benchdb/analyze.py`, no LLM calls). The graph is the one of section 11: a node per content word or entity token, an edge per dependency between kept tokens. Three descriptions of it:
+
+| | What it is | Example |
+|---|---|---|
+| `template` | the graph with the words removed: every node becomes its part of speech or `ENT:<type>`, every edge its dependency label, written as a canonical bracketed string that does not depend on word order (children are sorted). `template_id` = first 10 hex characters of its SHA-1 | `WH:what ; NOUN[pobj>ENT:GPE,pobj>NOUN[amod>ADJ]]` |
+| `shape` | a coarse bucketed description: lead word (the wh-word, or VERB / AUX / OTHER), sentences (1, 2, 3+), nodes (1-3, 4-6, 7-10, 11+), depth (0-1, 2, 3, 4+), named entities (0, 1, 2, 3+). Coarse enough that real and generated prompts share shapes | `what|S1|N4-6|D2|E1` |
+| `text_template` | the text with every entity replaced by its type | `What is the {CONCEPT} of the {CONCEPT} in {GPE}?` |
+
+Entity tokens of the same type that neighbour each other ("New" "York") are merged into one node. For an **answer** the template is that of its first sentence; its shape and graph cover the whole answer (cut at `benchdb.answer_chars`, 1200). The `E` in a shape counts spaCy *named entities* only, not concepts. Each `slots` entry lists an entity node of the template with its text, so a template can be filled again with other entities of the same type.
+
+**`--add_graphs examples.csv`.** Adds example prompts (for instance what real patients ask in this field) as kind `example`. They enter the template library, and `gen_bench.py` uses them in two ways: their word counts become M1's target lengths (`length.target.mode: real`), and `--select match-examples` picks benchmark items whose shapes match the examples' distribution.
+
+**Settings** (`benchdb:` in `config.yaml`): `dir` (default `results/benchdb`), `spacy_model` (null = `real_queries.spacy_model`), `concepts`, `passage_entities`, `answer_chars`. Command-line: `--spacy-model`, `--no-concepts`, `--no-passages`, `--limit`.
+
+**Python use.**
+
+```python
+from src.benchdb.store import BenchDB
+db = BenchDB.open("medical.benchmark")
+db.counts(); db.items(kind="benchmark"); db.entities("ragas-medrag-0001", "question")
+db.graph("ragas-medrag-0001", "answer")["template"]; db.template_counts(level="shape", kind="real")
+db.top_entities(label="CONCEPT", n=20); db.passage_entity_pool()
+```
+
+## 30. Generating test prompts: `scripts/gen_bench.py`
+
+For people who **test** a RAG. It takes items from a database (section 29), applies the mutations of section 13 and writes prompts, each with the reference answer for the mutated prompt and the behaviour that counts as correct.
+
+```bash
+python scripts/gen_bench.py --list-mutations
+python scripts/gen_bench.py --db medical.benchmark --n 200 --mutation all --out prompts.jsonl
+python scripts/gen_bench.py --db medical.benchmark --n 100 --depth=3 --mutation=elaborate,colloquial --random=Y --out p.jsonl
+```
+
+### 30.1 The mutations and their names
+
+| Name | Id | Config | What it does | Operators (usable as `--mutation` values) |
+|---|---|---|---|---|
+| **Elaborate** | `m1` | `length` | adds on-topic text so the prompt is as long as real ones | `restate`, `background`, `instruction`, `appositive` |
+| **Colloquial** | `m2` | `linguistic` | changes how the question is worded | `typos`, `casual`, `first_person`, `politeness`, `imperative`, `synonyms` |
+| **Premise** | `m3` | `userinfo` | the user states something first: true, wrong or unsupported | `true_premise`, `correct_candidate`, `false_premise`, `wrong_candidate`, `unsupported_assumption` |
+| **Composite** | `m123` | | every chosen mutation in one prompt (`--combine`) | |
+
+`--mutation` takes a comma-separated list of names, ids, config names, or single operators, or `all`: `elaborate,typos,premise` means all of Elaborate, only `typos` of Colloquial, all of Premise. The names are labels only; the ids `m1`, `m2`, `m3` are used in every file and table of this repository.
+
+### 30.2 Tunable parameters
+
+| Option | Meaning |
+|---|---|
+| `--n` | number of items |
+| `--depth N` | how many operators are stacked in a prompt, in Elaborate and Colloquial (Premise always adds one claim: a second claim could interact with the first, which the guarantees of section 13.2 do not cover). If fewer operators are enabled, fewer are applied. With `--depth`, Elaborate adds exactly N operators instead of aiming for a real-query length |
+| `--random Y/N` | `Y`: new randomness each run (seed from the clock). `N` (default): reproducible, seed from `mutation.seed`. The seed used is printed and stored in every row; `--seed S` fixes it |
+| `--p-correct P` | Premise: share of correct user claims (rest: wrong or unsupported) |
+| `--target-length` | `real` (default; the lengths of the database's real/example prompts, else of `data/real_queries`), `none`, `range:25-80`; ignored with `--depth` |
+| `--select` | `diverse` (default: take turns between different graph templates), `random`, `first`, `match-examples` |
+| `--entity-types A,B`, `--entities x,y`, `--template ID`, `--shape S`, `--methods`, `--in-union` | restrict which items are mutated |
+| `--combine` | also write the Composite prompt |
+| `--no-llm` | only rule-based operators (`instruction`, Colloquial without `synonyms`): needs no API key, cannot do Premise |
+| `--dry-run`, `--format jsonl|csv` | plan and cost; output format |
+
+### 30.3 Output
+
+One row per (item, mutation): `prompt`, `original_question`, `reference_answer`, `expected_behavior` (`answer`, `reject_premise`, `abstain`; section 14.2), `answer_changed`, `operators`, `kind` and `claim` (Premise), the entities / `template_id` / `template` / `shape` / `text_template` of the original question, the shape and template of the mutated prompt, `seed`, and `meta` (what each operator wrote, the verifier's reply).
+
+### 30.4 How it relates to the pipeline
+
+`gen_bench.py` calls the same functions as `mutate_benchmark.py` (same operators, same checks, section 13). The pipeline mutates *every* question of a generated benchmark for the evaluation; `gen_bench.py` mutates a *selection* from any database, with the settings above. Nothing in the evaluation depends on it.
+
+### 30.5 Assumptions, and what happens without a passage or answer
+
+The guarantees of section 13.2 need the source passage (A1) and the reference answer. For a database item that has both, every operator and check applies. For an item without them (a CSV with questions only):
+- **Elaborate** can use only `instruction` and `restate`; the LLM check that needs the passage is switched off for it and the row's `meta.verified` is `false`;
+- **Colloquial** is rule-based and applies in full;
+- **Premise** cannot be made (its claims are written from the passage and verified against it); the row is skipped and the run reports why.
+Report which items had passages. Verified and unverified prompts should not be mixed in one number without saying so.
+
+## 31. The union of the three methods (`scripts/build_union.py`)
+
+```bash
+python scripts/build_union.py --rags medrag
+```
+
+RAGAS, ARES and DataMorgana sometimes produce near-identical questions from the same passage. The **union** keeps one of each group: questions are taken in turn from every method (so none dominates), and a question is dropped when its embedding cosine similarity to one already kept is at least `union.dedupe_threshold` (default 0.9, the local `bge-small` model). Output: `<benchmark.output_dir>/<rag>_<tag>/union.jsonl` and `union.meta.json` (input, kept and dropped counts per method). No LLM calls.
+
+**The union is a view, not a new run.** A union question *is* the question of the method it came from, so its mutated versions and its evaluation results are those of that method. Nothing is mutated or evaluated twice; `paper_report.py` selects the union's questions by id (and the database marks them `meta.in_union`). With 10,000 questions per method the union has fewer than 30,000 questions; the report states the number and how many each method contributed. If you mutate or evaluate only a sample (`--mutate-n`, `--eval-n`), the union tables use the questions that are in the union *and* in the sample.
+
+## 32. The paper pipeline and report
+
+### 32.1 The `paper` profile
+
+`--profile paper` (section 12) asks for **10,000 questions per RAG x method** (`benchmark.size.count`), writes to `results/*_paper` folders (never mixing with other runs), evaluates a sample of 1,000 questions per RAG x method (`evaluation.sample_per_file`; `null` = all), and puts the report in `results/paper_final`. Edit the profile at the bottom of `config.yaml`.
+
+*Corpus size.* 10,000 questions need at least 10,000 / `max_questions_per_passage` passages (6 in this profile). The profile uses 6 MedRAG textbooks instead of 3 as a guess; `python scripts/run_all.py --profile paper --rags medrag --dry-run` prints how many questions each method can produce, and a warning appears if a corpus is too small (raise `corpora.medrag.max_textbooks`, then rebuild the index: local, no LLM calls).
+
+*Cost.* Order of magnitude for MedRAG only, three methods: generation about 100,000 LLM calls (2 to 4 per attempt plus rejected attempts); mutation 5 per question, so about 150,000 for all 30,000 questions (`--mutate-n` caps it); evaluation about 36 per question over the six conditions, so about 108,000 for 1,000 questions per method. These are estimates; the `--dry-run` of `run_all.py` gives the numbers for your settings.
+
+### 32.2 What the report contains (`scripts/paper_report.py`)
+
+For each RAG, in the order of the story:
+
+| Part | Content |
+|---|---|
+| 1. Real queries | number, mean words, sentences, entities per query, distinct graph shapes, commonest shapes |
+| 2. Benchmarks (RAGAS, ARES, DataMorgana, **union**) | size; **AUC** of a classifier separating the set from real queries (the 25 features of section 11); **shape / template / entity-type JS divergence** against the real queries (Jensen-Shannon, in bits, 0 = same distribution); number of distinct templates and shapes; template and shape **entropy** (variety); `real_shape_coverage` (share of real queries whose shape the benchmark also has) and `shape_in_real`; **entity overlap** (share of benchmark entities that real users also mention; share of real entities found in the corpus) |
+| 3. Mutations | kept / rejected counts of each mutation's checks (the validity of the mutation), and the same realism numbers for the mutated versions alone, and pooled with the originals (Benchmark + M1, + M2, + M3, + all three = Benchmark+) |
+| 4. Hallucinations | for each method and the union: accuracy and hallucination rate of the benchmark and of every Benchmark+ set (N, 2N, 4N questions; section 14.7), controls, the paired change with tests (section 14.4), and which questions change status (section 14.8) |
+| 4b. Refusals | how often the RAG answered "Cannot be answered from given information." per method, union and condition, with `became_refused` / `stopped_refusing` / `refused_in_both` (section 14.10); `refusals.csv` |
+| 5. Story table | one table per RAG: real queries, the three methods, the union, union + M1, + M2, + M3, and Benchmark+ with realism and hallucination columns side by side; as markdown, CSV and a booktabs `.tex` |
+| 6. Cost, provenance | LLM calls and tokens of generation and mutation, models, files |
+
+It also writes `audit_sheet_mutations.csv`: a random sample (`paper.audit_n` = 100 per mutation) of mutated questions with the passage and empty columns for a human to fill in (same question asked? reference answer still correct? added text supported? natural 1 to 5?). Reporting these shares is the only validation of assumption A4 (section 13.2) and of the realism of the wording, and a reviewer will ask for it.
+
+**How to read the two kinds of columns.** Realism columns say whether the question *set* looks like real use; hallucination columns say how often the RAG fails on it. The claim of the paper is the combination: Benchmark+ should be closer to real queries (lower AUC and JS) and expose more failures than the unchanged benchmark (higher hallucination rate beyond the controls). Report both, and the union next to the single methods to show the effect is not one generator's artefact.
+
+**What the template metrics cannot tell you.** Shapes and templates describe structure, not meaning: two prompts with the same template can ask about unrelated things. The metrics compare *distributions* (JS divergence) and the realism features are the same ones the mutations were designed from; the circularity note of section 20.4 applies (use real queries you did not design on). The medical concept entities come from noun phrases, so they include generic nouns ("function"); a biomedical NER model gives a cleaner entity database.
+
+### 32.3 Order of a first paper run
+
+1. `--dry-run`; 2. a pilot in its own folders (profile `pilot`: `bash run_paper.sh --pilot --n 10`, results in `results/*_pilot`, so it never mixes with earlier runs) to read the questions, the database (`create_bench.py --info`) and the report with your own eyes; 3. the paper profile, step by step (commands in section 33); 4. fill in the audit sheet; 5. recompute the realism numbers with held-out real queries.
+
+### 32.4 Example prompts for the paper (`scripts/paper_examples.py`)
+
+```bash
+python scripts/paper_examples.py --rags medrag --n 3 --seed 7
+```
+
+Writes `paper_examples.md`, `paper_examples.tex` (four booktabs tables), `paper_examples.json` and `example_graphs_<rag>.png/.pdf` to `paper.output_dir`:
+
+| Part | Content |
+|---|---|
+| A. Simple benchmark queries | `n` questions per method, chosen near the median length (not outliers), with the reference answer |
+| B. Realistic queries | real user queries of the domain (8 to 40 words) |
+| C. Entities and graph templates | for a few prompts with different templates: the named entities, the text template with entity slots, the graph template, the shape, an ASCII drawing of the graph, the reference answer's template and entities, and a figure of the graphs; plus one real query |
+| D. Mutated queries | per method, the same question after Elaborate, Colloquial and Premise with the operators, the reference answer *for that prompt*, the expected behaviour and, if evaluation results exist, what the RAG did with the original and with the mutated prompt (examples where a mutation changed the outcome come first, and the three Premise behaviours are covered) |
+| E. Refusals | counts of "Cannot be answered from given information." per method and condition (benchmark, M1, M2, M3, and the union), examples of original questions the RAG refuses, examples of mutated questions it refuses although it answered the original; `refusal_counts_<rag>.csv` and one LaTeX table (section 14.10) |
+
+## 33. Command lists
+
+The full, copy-ready lists are in **`COMMANDS.md`**: (A) the medical RAG building blocks (corpus and index, generating, `create_bench`, `gen_bench`, evaluating) and (B) the paper run (10,000 questions per method, union, mutations, evaluation, report, examples). The paper run in one command:
+
+```bash
+python scripts/run_all.py --profile paper --rags medrag --mutate-n 3000 --eval-n 1000
+```
+
+Order of the steps: `corpora, indexes, real, generate, union, db, stats, mutate, evaluate, analyze, audit, compare, report, examples`. Run it first with `--dry-run`. For the held-out realism check: `python scripts/compare_mutations.py --real-file <file> --real-domain medical`.

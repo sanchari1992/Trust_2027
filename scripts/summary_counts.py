@@ -34,6 +34,8 @@ Columns:
                  detail counts as correct when that is what the question required)
     wrong        not correct and did not decline (incorrect / followed a false claim / accepted a detail)
     abstained    declined to answer (a failure for an answerable question, never a hallucination)
+    refused      the RAG answered exactly "Cannot be answered from given information." (its system prompt asks for
+                 that when the documents lack the information); refused <= abstained. refused_rate = refused / total
     accuracy     correct / total
     hallucinated unfaithful or wrong-behaviour answers (README section 14); hallucination_rate = hallucinated / total
     wrong_behavior, unsupported_but_correct   the two parts of the hallucination count
@@ -73,6 +75,44 @@ def paired_counts(df):
     return out
 
 
+def paired_refusals(df):
+    """{condition: (became_refused, stopped_refusing, refused_in_both)} versus the baseline, over questions in both."""
+    wide = df.pivot_table(index=KEYS, columns="condition", values="refused", aggfunc="first", observed=True)
+    out = {}
+    if "baseline" not in wide:
+        return out
+    for c in [c for c in wide.columns if c != "baseline"]:
+        sub = wide[["baseline", c]].dropna()
+        b, x = sub["baseline"].to_numpy(), sub[c].to_numpy()
+        out[str(c)] = (int(((b == 0) & (x == 1)).sum()), int(((b == 1) & (x == 0)).sum()), int(((b == 1) & (x == 1)).sum()))
+    return out
+
+
+def refusal_table(df, by):
+    """How often the RAG said "Cannot be answered from given information.", per condition, and how that changes
+    question by question: became_refused (answered the original, refuses the mutated one: typically M3, where the
+    added patient information makes the question unanswerable from the documents), stopped_refusing (the reverse),
+    refused_in_both (the documents never had the answer)."""
+    rows = []
+    for key, d in (df.groupby(by) if by else [((), df)]):
+        key = key if isinstance(key, tuple) else (key,)
+        pr = paired_refusals(d)
+        for cond, g in d.groupby("condition", observed=True):
+            cond = str(cond)
+            total, n = len(g), int(g["refused"].fillna(0).sum())
+            bec, stop, both = pr.get(cond, (np.nan, np.nan, np.nan))
+            rows.append({**dict(zip(by, key)), "condition": CONDITION_LABELS.get(cond, cond), "_c": cond, "total": total,
+                         "refused": n, "refused_rate": n / total if total else np.nan,
+                         "abstained_by_judge": int(g["abstained"].sum()),
+                         "became_refused": bec, "stopped_refusing": stop, "refused_in_both": both})
+    t = pd.DataFrame(rows)
+    if t.empty:
+        return t
+    order = {c: i for i, c in enumerate(CONDITION_LABELS)}
+    t["_o"] = t["_c"].map(order)
+    return t.sort_values(by + ["_o"]).drop(columns=["_c", "_o"]).reset_index(drop=True)
+
+
 def table(df, by):
     rows = []
     for key, d in (df.groupby(by) if by else [((), df)]):
@@ -85,6 +125,7 @@ def table(df, by):
             nf, nx, both = pc.get(cond, (np.nan, np.nan, np.nan))
             rows.append({**dict(zip(by, key)), "condition": CONDITION_LABELS.get(cond, cond), "_c": cond,
                          "total": total, "correct": correct, "wrong": failed - ab, "abstained": ab,
+                         "refused": int(g["refused"].fillna(0).sum()),
                          "accuracy": correct / total, "hallucinated": int(g["hallucinated"].sum()),
                          "hallucination_rate": g["hallucinated"].mean(),
                          "wrong_behavior": int(g["wrong_behavior"].fillna(0).sum()),
@@ -133,6 +174,7 @@ def bplus_table(df, by, n_boot, seed):
             rows.append({**dict(zip(by, key)), "benchmark_plus": label, "questions": len(s),
                          "added_questions": len(added), "correct": int(s["correct_"].sum()),
                          "wrong": int(s["wrong_"].sum()), "abstained": int(s["abstained"].sum()),
+                         "refused": int(s["refused"].fillna(0).sum()),
                          "accuracy": s["correct_"].mean(), "hallucinated": int(s["hallucinated"].sum()),
                          "hallucination_rate": s["hallucinated"].mean(),
                          "rate_ci_low": float(np.percentile(rates, 2.5)), "rate_ci_high": float(np.percentile(rates, 97.5)),
@@ -143,7 +185,8 @@ def bplus_table(df, by, n_boot, seed):
     return pd.DataFrame(rows)
 
 
-METRICS = {"failed": "not correct (wrong + declined)", "hallucinated": "hallucinated"}
+METRICS = {"failed": "not correct (wrong + declined)", "hallucinated": "hallucinated",
+           "refused": "refused (Cannot be answered from given information.)"}
 
 
 def combined_table(df, by):
@@ -178,6 +221,8 @@ def main():
     out = ROOT / cfg["evaluation"]["output_dir"] / "_report"
     out.mkdir(parents=True, exist_ok=True)
     comb_pooled, comb_per = combined_table(df, []), combined_table(df, ["rag", "method"])
+    ref_pooled, ref_per = refusal_table(df, []), refusal_table(df, ["rag", "method"])
+    ref_per.to_csv(out / "refusals.csv", index=False)
     bplus.to_csv(out / "benchmark_plus.csv", index=False)
     bplus_per.to_csv(out / "benchmark_plus_by_rag_method.csv", index=False)
     pooled.to_csv(out / "summary_counts_pooled.csv", index=False)
@@ -195,14 +240,21 @@ def main():
           "`Benchmark + M1+M2+M3 (all three)` is the only combined one. `wrong` = not correct and not declined; "
           "`abstained` = declined; wrong + abstained = all failures. `accuracy` = correct / total. "
           "`newly_failed` / `newly_fixed` / `failed_in_both` compare each question with its own unchanged version; "
-          "`failed_in_both` are the questions that fail whatever you do to them.", "",
+          "`failed_in_both` are the questions that fail whatever you do to them. `refused` = the answer was exactly "
+          "\"Cannot be answered from given information.\" (a subset of `abstained`).", "",
           "## All RAGs and methods pooled", "", df_to_md(pooled), "", "## Per RAG and method", "", df_to_md(per), "",
           "## Combined count, step by step", "",
           "`sum` = benchmark + new failures added by M1 + M2 + M3 (a question that newly fails under two mutations "
           "is counted twice); `union` = the same without double counting (never above the number of questions); "
           "`double_counted` = sum - union. This estimates the failures of a benchmark that uses all three mutations "
           "as separate variants; it does not measure ONE prompt that contains all three mutations "
-          "(`evaluation.combined: run`).", "", df_to_md(comb_pooled), "", df_to_md(comb_per), ""]
+          "(`evaluation.combined: run`).", "", df_to_md(comb_pooled), "", df_to_md(comb_per), "",
+          "## Refusals (\"Cannot be answered from given information.\")", "",
+          "`refused` counts answers that are exactly the refusal phrase the RAG's system prompt asks for when the documents "
+          "lack the information. `became_refused` = answered in the benchmark, refuses in this version (for M3: the added "
+          "patient information makes the question unanswerable); `stopped_refusing` = the reverse; `refused_in_both` = "
+          "the documents never held the answer. `abstained_by_judge` also counts declines in other words.", "",
+          df_to_md(ref_pooled), "", df_to_md(ref_per), ""]
     (out / "summary_counts.md").write_text("\n".join(md), encoding="utf-8")
     pd.set_option("display.width", 250)
     pd.set_option("display.width", 250)
@@ -210,6 +262,8 @@ def main():
     print(bplus.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
     print("\nEach condition on its own, paired with the benchmark:")
     print(pooled.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+    print("\nRefusals (Cannot be answered from given information.):")
+    print(ref_pooled.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
     print("\nCombined count, step by step (benchmark + new failures of M1 + M2 + M3):")
     print(comb_pooled.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
     print(f"\nWritten: {out / 'summary_counts.md'}")

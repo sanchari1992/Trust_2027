@@ -217,3 +217,16 @@ def mutate_length(item, ctx, mc, rng):
             info["verification"] = detail
         return {"ok": True, "prompt": prompt, "operators": ops, "info": info, "attempts": attempt + 1}
     return {"ok": False, "reason": last}
+
+
+def fallback_length(item):
+    """Last resort when every attempt failed its check (mutation.fill_all): the question plus ONE content-free
+    answer-style instruction from the fixed list. No LLM, no check needed: the sentence has no domain content, so
+    what is asked and the answer cannot change. Recorded with info["fallback"] so the report can count them."""
+    import random
+
+    text = random.Random(item["id"]).choice(INSTRUCTIONS)
+    prompt = Prompt(core=item["question"])
+    prompt.post.append(text)
+    return {"ok": True, "prompt": prompt, "operators": ["instruction"],
+            "info": {"instruction": text, "fallback": "template_only"}}

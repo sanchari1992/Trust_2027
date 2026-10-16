@@ -17,11 +17,12 @@ from concurrent.futures import ThreadPoolExecutor
 from src.benchgen.common import append_jsonl, read_jsonl
 from src.config import ROOT, corpus_tag, index_dir
 from src.evalrun.judge import Judge
+from src.llm import USAGE
 from src.evalrun.controls import control_rows, retrieval_scores
 from src.mutate.common import CONDITION_LABELS, CONTROL_CONDITIONS, active_conditions, condition_file
 from src.rags.registry import get_rag
 
-CALLS_PER_ANSWER = 6  # rough: ~2 for the RAG, ~4 for the judge (label, statements, verdicts with and without the user message)
+CALLS_PER_ANSWER = 5  # rough upper bound: 1 for the RAG, ~4 for the judge (label, statements, 1-2 verdict checks); cache hits and refusals cost less
 
 
 def eval_file(cfg, cond, rag, method):
@@ -144,6 +145,9 @@ def evaluate(rag_name, method, cfg, rag_obj=None, conds=None, limit=None, fresh=
                          "hallucination_rate": round(sum(r["hallucinated"] for r in ok) / len(ok), 3) if ok else None,
                          "errors": len(rs) - len(ok)}
         print(f"  -> {summary[cond]}")
+    u = USAGE.snapshot()
+    print(f"API calls in this run: {u['calls']:,} (plus {u['cache_hits']:,} judge calls answered from the cache); "
+          f"tokens in/out: {u['prompt_tokens']:,}/{u['completion_tokens']:,}")
     if rag_obj is None:
         rag.close()
     return summary

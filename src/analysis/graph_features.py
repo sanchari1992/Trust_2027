@@ -24,7 +24,12 @@ def get_nlp(model_name):
 
 def question_graph(text, nlp):
     """Build a directed graph for one question. Returns a networkx.DiGraph."""
-    doc = nlp(text)
+    return question_graph_from_doc(nlp(text))
+
+
+def question_graph_from_doc(doc):
+    """The same graph from an already parsed spaCy Doc (lets callers parse a text once and reuse it
+    for entities, graph and features)."""
     keep = {t.i for t in doc if t.pos_ in CONTENT_POS and not t.is_stop}
     ent_spans = {t.i: ent.label_ for ent in doc.ents for t in ent}
 

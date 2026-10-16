@@ -21,6 +21,15 @@ The strict score (retrieved context only) is always kept as faithfulness_strict 
 hallucinated_strict (evaluation.also_strict_faithfulness, one extra judge call per answer), so both
 versions can be reported.
 
+COST. The plain check goes first; if it finds every statement supported, the check with the user message is skipped
+(evaluation.skip_redundant_verdicts: adding context cannot remove support). Judge calls (temperature 0) are also cached on
+disk (llm.cache, src/llmcache.py), so judging the same answer twice costs nothing.
+
+REFUSALS. The RAG's system prompt tells it to answer exactly "Cannot be answered from given information." when its
+documents lack what the question needs (medrag.refusal_instruction). An answer that is that phrase is `refused`
+(exact, no LLM call; it gets the label "abstained", or "flagged" for an unsupported detail). `abstained` is wider: it
+also includes declines the judge recognises in other words. refused <= abstained.
+
 Outcome definitions (per answer):
   unfaithful    F < evaluation.faithfulness_threshold (some statement is not supported by the context)
   correct       the label is not a FAILURE label (below). Declining to answer an answerable
@@ -34,6 +43,7 @@ from functools import partial
 
 from src.benchgen.common import parse_json_objects
 from src.llm import get_chat_func
+from src.rags.base import is_refusal, refusal_phrase
 
 SYSTEM = "You are a helpful assistant."
 JSON_SYSTEM = "You are a careful, strict evaluator. Reply with JSON only, no other text."
@@ -124,6 +134,7 @@ def _claim_text(row):
 class Judge:
     def __init__(self, cfg):
         self.ev = cfg["evaluation"]
+        self.phrase = refusal_phrase(cfg)
         jcfg = cfg
         if self.ev.get("judge_llm"):  # judge with another model than the one inside the RAGs
             jcfg = {**cfg, "llm": {**cfg["llm"], **self.ev["judge_llm"]}}
@@ -166,6 +177,21 @@ class Judge:
             with_user = (context + "\n\n[Message written by the user. A statement that merely repeats or "
                          "restates what the user said here counts as supported. Do not use this message to "
                          "support any other statement.]\n" + user_message)
+        if strict and user_message and self.ev.get("skip_redundant_verdicts", True):
+            # The plain check (retrieved context only) goes first. Adding the user's message to the context can only
+            # add support, so when every statement is already supported by the retrieved context the second check
+            # (with the user message) would also say "all supported": it is not asked. One call less for every
+            # faithful answer. When some statement is unsupported, the second check runs as before.
+            v2, issue2 = self._verdicts(context, statements)
+            if all(v == "yes" for v in v2):
+                verdicts, issue = v2, issue2
+            else:
+                verdicts, issue = self._verdicts(with_user, statements)
+                issue = issue or issue2
+            supported = sum(v == "yes" for v in verdicts)
+            return {"faithfulness": supported / len(statements), "n_statements": len(statements),
+                    "n_supported": supported, "parse_issue": issue,
+                    "faithfulness_strict": sum(v == "yes" for v in v2) / len(statements)}
         verdicts, issue = self._verdicts(with_user, statements)
         supported = sum(v == "yes" for v in verdicts)
         out = {"faithfulness": supported / len(statements), "n_statements": len(statements),
@@ -204,12 +230,18 @@ class Judge:
         response = result.get("answer") or ""
         contexts = result.get("contexts") or []
         out = {"label": None, "correct": None, "faithfulness": None, "n_statements": None,
-               "n_supported": None, "unfaithful": None, "hallucinated": None, "abstained": None,
+               "n_supported": None, "unfaithful": None, "hallucinated": None, "abstained": None, "refused": None,
                "faithfulness_strict": None, "unfaithful_strict": None, "hallucinated_strict": None,
                "wrong_behavior": None,
                "judge_error": False,
                "faithfulness_parse_issue": False}
-        label = self.label(row, response) if response.strip() else "abstained" if behavior != "abstain" else "flagged"
+        # The RAG answered with the refusal phrase ("Cannot be answered from given information."): no judge call needed.
+        refused = is_refusal(response, self.phrase)
+        out["refused"] = bool(refused)
+        if refused or not response.strip():
+            label = "flagged" if behavior == "abstain" else "abstained"
+        else:
+            label = self.label(row, response)
         if label is None:
             out["judge_error"] = True
             return out

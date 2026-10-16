@@ -63,7 +63,7 @@ def run_one(a_path, a_field, a_name, b_path, b_field, b_name, cfg, limit=None):
         "classifier": clf,
         "feature_table": table.to_dict(orient="records"),
     }
-    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     sig = table[table["q_value"] < 0.05]
     lines = [
@@ -81,7 +81,7 @@ def run_one(a_path, a_field, a_name, b_path, b_field, b_name, cfg, limit=None):
             f"- `{r['feature']}`: {a_name}={r[f'mean_{a_name}']:.3f} vs {b_name}={r[f'mean_{b_name}']:.3f} "
             f"(diff={r['diff']:.3f}, 95% CI [{r['diff_ci_low']:.3f}, {r['diff_ci_high']:.3f}], q={r['q_value']:.4f})"
         )
-    (out_dir / "report.md").write_text("\n".join(lines))
+    (out_dir / "report.md").write_text("\n".join(lines), encoding="utf-8")
     print(f"AUC={clf['held_out_auc']:.3f} | {len(sig)}/{len(table)} features significant -> {out_dir}")
     return summary
 

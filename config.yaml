@@ -11,6 +11,8 @@ llm:
   api_key_env: DEEPSEEK_API_KEY
   thinking: disabled
   temperature: 0.0
+  cache: true                     # cache the deterministic calls (judge, mutation checks: those that ask for temperature 0). A repeated, resumed or --fresh run does not pay for them again; RAG answers and all text-writing calls are never cached (README 14.11)
+  cache_path: results/llm_cache.sqlite
 
 embedding:
   # DeepSeek has no embedding API, so embeddings run locally.
@@ -45,6 +47,8 @@ raptor:
 medrag:
   top_k: 32                      # MedRAG's default number of retrieved snippets
   batch_size: 32                 # snippets embedded at a time when building the index
+  refusal_instruction: true      # add to the system prompt: if the documents lack the information, answer exactly the refusal phrase (README 14.10). false = the original MedRAG prompt
+  refusal_phrase: "Cannot be answered from given information."   # the judge and all counts look for exactly this answer (the `refused` column)
 
 # Question used by scripts/test_rag.py (you can also pass your own with --question)
 tests:
@@ -156,6 +160,7 @@ mutation:
   temperature: 0.3                # LLM randomness when WRITING mutation text (checks always use 0)
   concurrency: 8                  # items processed in parallel
   max_retries: 2                  # a mutation that fails its check is redone up to this many extra times, then dropped
+  fill_all: true                  # one version of each mutation for EVERY question: a mutation that fails its checks is replaced by a fallback (Elaborate: a template instruction, Colloquial: one rule-based operator, Premise: more tries) instead of being dropped, and earlier questions with a missing mutation are filled in when you run the step again. Fallbacks are marked in the row's meta and counted in the report. false = drop failures (README 13.12)
   max_items_per_file: null        # cap items per (rag, method); null = all. (--limit on the command line does the same)
   generate_combined: false        # true = also create the m123 questions (all three mutations in one prompt); only needed with evaluation.combined: run
 
@@ -235,9 +240,30 @@ evaluation:
   max_context_chars: 60000        # retrieved context given to the faithfulness judge is cut at this length
   user_message_as_context: true   # a statement that only repeats what the USER said counts as supported (adopting a false claim is caught by the behaviour label). false = plain faithfulness against the retrieved context
   also_strict_faithfulness: true  # also keep the plain score (faithfulness_strict, hallucinated_strict): 1 extra judge call per answer, so both versions can be reported
+  skip_redundant_verdicts: true   # the strict faithfulness check goes first; if it finds every statement supported, the check WITH the user message (which can only add support) is not asked: 1 judge call less for every faithful answer. false = always ask both
   also_source_faithfulness: false # also score faithfulness against ORIGINAL source text only (1 extra judge call per answer)
   store_contexts: false           # true = keep the retrieved contexts in every result row (large files)
   bootstrap_samples: 2000         # resamples for confidence intervals in the analysis
+
+# ------------------------------------------------------------------------
+# Benchmark database (named entities + graph templates), the union of the benchmark methods, and the paper report.
+# README sections 29 to 33.
+# ------------------------------------------------------------------------
+benchdb:
+  dir: results/benchdb            # where <name>.benchmark databases are written
+  spacy_model: null               # null = real_queries.spacy_model. A biomedical model (e.g. scispaCy en_core_sci_md) finds medical entities that en_core_web_sm misses
+  concepts: true                  # also store noun phrases that are not named entities, as entities of type CONCEPT
+  passage_entities: true          # also store the entities of the source passages (once per passage)
+  answer_chars: 1200              # an answer is cut at this length before it is analysed
+
+union:
+  dedupe_threshold: 0.9           # union of the benchmark methods: drop a question whose embedding cosine similarity to one already kept is at least this (null = keep all)
+
+paper:
+  output_dir: results/paper       # paper_report.py / paper_examples.py write here
+  max_per_set: 5000               # sets larger than this are sampled (once, seeded) for the classifier and template statistics
+  audit_n: 100                    # mutated questions per mutation in the hand-audit sheet
+  seed: 42
 
 # ------------------------------------------------------------------------
 # Profiles: sets of overrides merged on top of everything above.
@@ -265,3 +291,49 @@ profiles:
       output_dir: results/eval_large
     analysis:
       output_dir: results/analysis_large
+
+  paper:
+    # The profile for the paper: 10,000 questions per RAG x method. The bigger corpora below are guesses that should
+    # give enough passages: check `python scripts/run_all.py --profile paper --dry-run`, it prints how many questions
+    # each method can actually produce. Evaluation uses a sample (evaluation.sample_per_file) because every question
+    # costs about 36 LLM calls over the six conditions; set it to null to evaluate every question.
+    corpora:
+      lightrag: {max_docs: 30}
+      raptor: {max_docs: 40}
+      medrag: {max_textbooks: 6}
+    benchmark:
+      output_dir: results/benchmarks_paper
+      size: {mode: count, count: 10000}
+      max_questions_per_passage: 6
+      max_attempts_factor: 4
+      temperature: 0.7
+      concurrency: 16
+    mutation:
+      output_dir: results/mutations_paper
+      concurrency: 16
+    evaluation:
+      output_dir: results/eval_paper
+      sample_per_file: 1000
+    analysis:
+      output_dir: results/analysis_paper
+    benchdb:
+      dir: results/benchdb_paper
+    paper:
+      output_dir: results/paper_final
+
+  pilot:
+    # A small trial in folders of its own (so it never mixes with your other runs, and an old result can never end up in
+    # its report). Same corpus and index as the default profile. Use: bash run_paper.sh --pilot --n 10
+    benchmark:
+      output_dir: results/benchmarks_pilot
+    mutation:
+      output_dir: results/mutations_pilot
+    evaluation:
+      output_dir: results/eval_pilot
+      sample_per_file: null
+    analysis:
+      output_dir: results/analysis_pilot
+    benchdb:
+      dir: results/benchdb_pilot
+    paper:
+      output_dir: results/paper_pilot

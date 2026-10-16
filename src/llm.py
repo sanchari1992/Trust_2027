@@ -18,6 +18,7 @@ class _Usage:
 
     def reset(self):
         self.calls = 0
+        self.cache_hits = 0  # temperature-0 calls answered from the disk cache (no API call)
         self.prompt_tokens = 0
         self.completion_tokens = 0
 
@@ -28,10 +29,15 @@ class _Usage:
                 self.prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
                 self.completion_tokens += getattr(usage, "completion_tokens", 0) or 0
 
+    def hit(self):
+        with self.lock:
+            self.cache_hits += 1
+
     def snapshot(self):
         with self.lock:
             return {
                 "calls": self.calls,
+                "cache_hits": self.cache_hits,
                 "prompt_tokens": self.prompt_tokens,
                 "completion_tokens": self.completion_tokens,
             }
@@ -88,8 +94,11 @@ def get_chat_func(cfg):
     from openai import OpenAI
     from tenacity import retry, stop_after_attempt, wait_random_exponential
 
+    from src.llmcache import LLMCache, get_cache
+
     c, api_key, base_url, extra_body = _settings(cfg)
     client = OpenAI(api_key=api_key, base_url=base_url)
+    cache = get_cache(cfg)
 
     @retry(
         wait=wait_random_exponential(min=1, max=20),
@@ -97,6 +106,14 @@ def get_chat_func(cfg):
         reraise=True,
     )
     def chat(system, user, max_tokens=None, temperature=None):
+        # Only calls that ask for temperature 0 explicitly are cached (judge, mutation checks); see src/llmcache.py
+        key = None
+        if cache is not None and temperature is not None and float(temperature) == 0:
+            key = LLMCache.key(c["model"], extra_body, system, user, max_tokens, 0)
+            hit = cache.get(key)
+            if hit is not None:
+                USAGE.hit()
+                return hit
         kwargs = {}
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
@@ -111,6 +128,9 @@ def get_chat_func(cfg):
             **kwargs,
         )
         USAGE.add(getattr(response, "usage", None))
-        return (response.choices[0].message.content or "").strip()
+        text = (response.choices[0].message.content or "").strip()
+        if key is not None and text:
+            cache.put(key, text)
+        return text
 
     return chat

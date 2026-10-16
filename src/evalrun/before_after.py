@@ -20,7 +20,7 @@ from src.evalrun.analysis import _levels, df_to_md, paired_bootstrap_diff
 from src.mutate.common import ALL_CONDITIONS as CONDITIONS, CONDITION_LABELS, DERIVED_CONDITIONS
 
 OUTCOMES = {"accuracy": "acc", "hallucination_rate": "hallucinated", "unfaithful_rate": "unfaithful",
-            "abstain_rate": "abstained"}
+            "abstain_rate": "abstained", "refusal_rate": "refused"}
 RATE_METRICS = set(OUTCOMES)
 
 
@@ -60,6 +60,7 @@ def summary_table(df):
                    "accuracy_answer_items": ans["acc"].mean() if len(ans) else np.nan,
                    "hallucination_rate": g["hallucinated"].mean(),
                    "unfaithful_rate": g["unfaithful"].mean(), "abstain_rate": g["abstained"].mean(),
+                   "refusal_rate": g["refused"].mean(),
                    "mean_faithfulness": g["faithfulness"].astype(float).mean()}
             row.update({f: g[f].mean() for f in ALL_NUMERIC_FEATURES})
             out.append(row)
@@ -146,6 +147,7 @@ def write_md(out_dir, df, summary, deltas, real, cfg):
                      "hallucination": _pct(r["hallucination_rate"]),
                      "Δ hallucination": "" if c == "baseline" else _delta(get("overall", "ALL", "ALL", "ALL", c, "hallucination_rate")),
                      "unfaithful": _pct(r["unfaithful_rate"]), "abstained": _pct(r["abstain_rate"]),
+                     "refused": _pct(r["refusal_rate"]),
                      "mean faithfulness": f"{r['mean_faithfulness']:.3f}"})
     L += ["## 1. Accuracy and hallucination, all RAGs and methods pooled", "", df_to_md(pd.DataFrame(rows)), ""]
 

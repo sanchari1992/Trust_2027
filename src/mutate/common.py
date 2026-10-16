@@ -44,6 +44,47 @@ CONDITION_LABELS = {
 }
 
 
+# Friendly names, so prompts can be generated with `--mutation elaborate,colloquial,premise`
+# (scripts/gen_bench.py) and the paper can refer to the mutations by name. The ids m1/m2/m3 are unchanged.
+MUTATION_INFO = {
+    "m1": {"name": "Elaborate", "family": "length", "aliases": ["m1", "length", "elaborate", "elaboration"],
+           "operators": ["restate", "background", "instruction", "appositive"],
+           "what": "adds on-topic text so the prompt is as long as real prompts"},
+    "m2": {"name": "Colloquial", "family": "linguistic", "aliases": ["m2", "linguistic", "colloquial", "colloquialize"],
+           "operators": ["typos", "casual", "first_person", "politeness", "imperative", "synonyms"],
+           "what": "rewrites how the question is worded (typos, casual register, first person, request form)"},
+    "m3": {"name": "Premise", "family": "userinfo", "aliases": ["m3", "userinfo", "premise", "user-premise"],
+           "operators": ["true_premise", "correct_candidate", "false_premise", "wrong_candidate",
+                         "unsupported_assumption"],
+           "what": "the user states something first: a true fact, a wrong or unsupported one"},
+}
+OPERATOR_OWNER = {op: mid for mid, info in MUTATION_INFO.items() for op in info["operators"]}
+COMBINED_NAME = "Composite"  # all selected mutations in one prompt (condition m123)
+
+
+def resolve_mutations(spec):
+    """'elaborate,typos,premise' -> {"m1": None, "m2": ["typos"], "m3": None}.
+    A mutation name / id / family selects the whole mutation (None = all its operators); an operator name selects
+    just that operator. 'all' = the three mutations. Unknown names raise ValueError with the choices."""
+    out = {}
+    for tok in [t.strip().lower() for t in str(spec).split(",") if t.strip()]:
+        if tok == "all":
+            out.update({m: None for m in MUTATION_INFO})
+            continue
+        mid = next((m for m, i in MUTATION_INFO.items() if tok in i["aliases"]), None)
+        if mid:
+            out[mid] = None
+        elif tok in OPERATOR_OWNER:
+            mid = OPERATOR_OWNER[tok]
+            if out.get(mid, []) is not None:
+                out.setdefault(mid, []).append(tok)
+        else:
+            names = [a for i in MUTATION_INFO.values() for a in i["aliases"]] + sorted(OPERATOR_OWNER)
+            raise ValueError(f"Unknown mutation '{tok}'. Use 'all', a mutation ({', '.join(names[:12])}, ...) "
+                             f"or an operator ({', '.join(sorted(OPERATOR_OWNER))}).")
+    return dict(sorted(out.items()))
+
+
 def benchmark_file(cfg, rag, method):
     return ROOT / cfg["benchmark"]["output_dir"] / f"{rag}_{corpus_tag(cfg, rag)}" / f"{method}.jsonl"
 
