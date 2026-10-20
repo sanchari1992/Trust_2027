@@ -20,3 +20,5 @@ networkx
 pandas
 nltk
 lemminflect
+fastapi
+uvicorn

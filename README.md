@@ -1635,3 +1635,47 @@ python scripts/run_all.py --profile paper --rags medrag --mutate-n 3000 --eval-n
 ```
 
 Order of the steps: `corpora, indexes, real, generate, union, db, stats, mutate, evaluate, analyze, audit, compare, report, examples`. Run it first with `--dry-run`. For the held-out realism check: `python scripts/compare_mutations.py --real-file <file> --real-domain medical`.
+
+## 34. The mutation web page and API (`scripts/serve_mutator.py`)
+
+A small web page where anyone types a question and its expected answer, ticks the mutations, and gets back the
+mutated prompt and the **new expected answer** (plus the expected behaviour: answer / reject the premise / say it
+cannot be answered). It runs the same code as the paper pipeline (`src/benchdb/generate.py`), for one prompt at a time.
+
+```
+pip install fastapi uvicorn            # once (also in requirements.txt)
+python scripts/serve_mutator.py        # then open http://127.0.0.1:8000
+```
+
+| Part | File | Job |
+|---|---|---|
+| Page (front end) | `web/index.html` | the form and the results, plain HTML, no build step |
+| API (back end) | `src/service/web.py` | `GET /api/mutations` (what can be chosen), `POST /api/mutate` (do it); interactive docs at `/docs` |
+| Engine | `src/service/mutator.py` | validates the request, calls the mutation code, adds fallbacks, shapes the answer |
+
+**What you enter.** Question; expected answer (needed for Premise, because the new answer is built from it);
+evidence (optional); the mutations (Elaborate, Colloquial, Premise, and Composite = all chosen ones in one prompt).
+"More options": pick single operators (e.g. only `typos`), force a correct or incorrect premise, stack 1-4
+operators, fix a seed for a repeatable result.
+
+**Evidence.** Premise and the checks of Elaborate need a source text. Without evidence the expected answer is used as
+the only source (`grounding: "answer_only"`; the page shows a note). Claims are then checked against the answer alone,
+which is weaker than checking against the textbook passage, so paste the passage when you have it. With neither
+answer nor evidence, Elaborate (instruction/restate only) and Colloquial still work; Premise is skipped.
+
+**Behaviour.** The three kinds of new expected answer are the ones of the paper: correct premise or Elaborate/Colloquial
+= answer unchanged; false premise or wrong candidate = "That is not correct. ..." + the real answer
+(`reject_premise`); unsupported assumption = "Cannot be answered from given information." (`abstain`).
+A mutation whose checks fail is replaced by the simple fallback (as `mutation.fill_all`) and tagged "simple fallback used".
+Each click costs about 1 to 7 LLM calls per mutation (Colloquial often 0 to 1, Premise 3 to 5).
+
+**Using it from code.**
+```
+curl -X POST http://127.0.0.1:8000/api/mutate -H "Content-Type: application/json" -d "{\"question\":\"What nerve supplies the diaphragm?\",\"answer\":\"The phrenic nerve.\",\"mutations\":[\"premise\"],\"premise_kind\":\"incorrect\"}"
+```
+The reply holds `results` (one per mutation: `prompt`, `expected_answer`, `expected_behavior`, `answer_changed`,
+`operators`, `premise`, `fallback`), `notes` and `not_generated`.
+
+**Safety.** Every request spends your DeepSeek key. The server listens on this computer only. To share it on a
+network start it with `--host 0.0.0.0 --token SECRET` (a token is then required, and typed into the page under "More
+options"). For a public website, put it behind a login and a rate limit first; this server has neither.

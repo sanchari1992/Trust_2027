@@ -78,3 +78,5 @@ For the realism numbers in the paper use real queries you did not design the mut
 
 Refusals (README 14.10): the counts of "Cannot be answered from given information." are in `summary_counts.md` (Refusals table), `refusals.csv`, `paper_report.md` (section 4) and `paper_examples.md` (part E).
 To switch the sentence off: `medrag.refusal_instruction: false` in `config.yaml`.
+
+Mutation web page / API (README 34): `python scripts/serve_mutator.py` then open http://127.0.0.1:8000 (API docs at /docs). Needs `pip install fastapi uvicorn`.

@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Benchmark+ Mutator</title>
+<style>
+  :root { --bg:#f7f7f5; --card:#fff; --ink:#1d1d1b; --muted:#6b6b66; --line:#dcdcd6; --accent:#1f5eff; --warn:#8a5a00; --warnbg:#fff4d6; --ok:#0a6b3c; --bad:#a3231a; --chip:#eef1ff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161616; --card:#1f1f1e; --ink:#ecece8; --muted:#a2a29b; --line:#34342f; --accent:#7ea2ff; --warn:#f0c46b; --warnbg:#3a3017; --ok:#6fd49b; --bad:#ff8b80; --chip:#262b3f; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.5rem; margin:0 0 4px; } .sub { color:var(--muted); margin:0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  label.f { display:block; font-weight:600; margin:12px 0 4px; } label.f:first-child { margin-top:0; }
+  .hint { font-weight:400; color:var(--muted); font-size:.875rem; }
+  textarea, input[type=text], input[type=password], input[type=number], select { width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); font:inherit; }
+  textarea { min-height:70px; resize:vertical; }
+  .muts { display:grid; gap:8px; }
+  .mut { border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .mut label { display:flex; gap:10px; align-items:flex-start; cursor:pointer; }
+  .mut input { margin-top:5px; } .mut b { display:block; } .mut small { color:var(--muted); }
+  details { margin-top:12px; } summary { cursor:pointer; color:var(--accent); }
+  .ops { display:flex; flex-wrap:wrap; gap:6px 14px; margin:8px 0; } .ops label { font-size:.9rem; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; } @media (max-width:560px) { .row { grid-template-columns:1fr; } }
+  button.go { margin-top:16px; background:var(--accent); color:#fff; border:0; border-radius:8px; padding:11px 22px; font:inherit; font-weight:600; cursor:pointer; }
+  @media (prefers-color-scheme: dark) { button.go { color:#0b1020; } }
+  button.go:disabled { opacity:.55; cursor:wait; }
+  button.small { background:none; border:1px solid var(--line); color:var(--ink); border-radius:6px; padding:3px 10px; font:inherit; font-size:.8125rem; cursor:pointer; }
+  .msg { padding:10px 12px; border-radius:8px; margin-bottom:12px; background:var(--warnbg); color:var(--warn); }
+  .msg.err { background:transparent; border:1px solid var(--bad); color:var(--bad); }
+  .res h2 { margin:0 0 8px; font-size:1.05rem; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .tag { font-size:.75rem; font-weight:600; padding:2px 8px; border-radius:99px; background:var(--chip); color:var(--accent); }
+  .tag.fb { background:var(--warnbg); color:var(--warn); }
+  .block { margin:10px 0; } .block .t { font-size:.8125rem; color:var(--muted); display:flex; justify-content:space-between; align-items:center; margin-bottom:3px; }
+  .box { white-space:pre-wrap; border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--bg); }
+  .beh { color:var(--muted); font-size:.9rem; } .beh b.changed { color:var(--bad); } .beh b.same { color:var(--ok); }
+  .meta { color:var(--muted); font-size:.8125rem; margin-top:8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Benchmark+ Mutator</h1>
+  <p class="sub">Enter a question and its expected answer, pick how to change it, and get the mutated prompt with its new expected answer.</p>
+
+  <form id="form" class="card">
+    <label class="f" for="q">Question / prompt</label>
+    <textarea id="q" required placeholder="e.g. What nerve supplies the diaphragm?"></textarea>
+
+    <label class="f" for="a">Expected answer <span class="hint">(needed for Premise)</span></label>
+    <textarea id="a" placeholder="e.g. The phrenic nerve."></textarea>
+
+    <label class="f" for="e">Evidence <span class="hint">(optional: the passage the answer comes from; gives better, better-checked results)</span></label>
+    <textarea id="e"></textarea>
+
+    <label class="f">Mutations</label>
+    <div class="muts" id="muts"></div>
+    <div class="mut" style="margin-top:8px"><label><input type="checkbox" id="comp">
+      <span><b>Composite</b><small>all chosen mutations together in one prompt</small></span></label></div>
+
+    <details>
+      <summary>More options</summary>
+      <div id="opsbox"></div>
+      <div class="row">
+        <div><label class="f" for="pk">Premise should be</label>
+          <select id="pk"><option value="either">either correct or incorrect</option><option value="correct">correct (answer stays)</option><option value="incorrect">incorrect (answer changes)</option></select></div>
+        <div><label class="f" for="dp">How many operators to stack <span class="hint">(blank = default)</span></label>
+          <input type="number" id="dp" min="1" max="4"></div>
+      </div>
+      <div class="row">
+        <div><label class="f" for="sd">Seed <span class="hint">(blank = new result each time)</span></label>
+          <input type="number" id="sd"></div>
+        <div id="tokbox" hidden><label class="f" for="tk">Access token</label><input type="password" id="tk"></div>
+      </div>
+    </details>
+    <button class="go" id="go" type="submit">Mutate</button>
+  </form>
+
+  <div id="out"></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let catalog = [];
+
+async function init() {
+  try {
+    const r = await (await fetch("/api/mutations")).json();
+    catalog = r.mutations; $("tokbox").hidden = !r.needs_token;
+  } catch (e) { $("out").innerHTML = `<div class="msg err">Cannot reach the server. Is scripts/serve_mutator.py running?</div>`; return; }
+  $("muts").innerHTML = catalog.map(m => `<div class="mut"><label><input type="checkbox" name="mut" value="${m.id}" checked>
+    <span><b>${esc(m.name)}</b><small>${esc(m.what)}</small></span></label></div>`).join("");
+  $("opsbox").innerHTML = catalog.map(m => `<div class="hint" style="margin-top:10px">${esc(m.name)}: only use these operators (none ticked = all)</div>
+    <div class="ops">${m.operators.map(o => `<label><input type="checkbox" data-m="${m.id}" value="${o}"> ${o.replace(/_/g," ")}</label>`).join("")}</div>`).join("");
+}
+
+function copyBtn(id) { return `<button type="button" class="small" data-copy="${id}">Copy</button>`; }
+
+document.addEventListener("click", e => {
+  const id = e.target.dataset && e.target.dataset.copy; if (!id) return;
+  navigator.clipboard.writeText($(id).textContent); e.target.textContent = "Copied"; setTimeout(() => e.target.textContent = "Copy", 1200);
+});
+
+function render(d) {
+  let h = "";
+  (d.notes || []).forEach(n => h += `<div class="msg">${esc(n)}</div>`);
+  d.results.forEach((r, i) => {
+    const same = !r.answer_changed;
+    const ans = r.expected_answer ?? "(no reference answer was given)";
+    h += `<div class="card res"><h2>${esc(r.name)}
+      ${r.fallback ? '<span class="tag fb">simple fallback used</span>' : ""}
+      ${r.premise_kind ? `<span class="tag">${esc(r.premise_kind)} premise</span>` : ""}</h2>
+      <div class="block"><div class="t"><span>Mutated prompt</span>${copyBtn("p" + i)}</div><div class="box" id="p${i}">${esc(r.prompt)}</div></div>
+      <div class="block"><div class="t"><span>New expected answer</span>${copyBtn("x" + i)}</div><div class="box" id="x${i}">${esc(ans)}</div></div>
+      <div class="beh"><b class="${same ? "same" : "changed"}">${same ? "Answer unchanged." : "Answer changed."}</b> ${esc(r.expected_behavior_text)}</div>
+      <div class="meta">Operators: ${r.operators.map(esc).join(", ") || "none"} · ${r.words.before} → ${r.words.after} words${r.checked_by_llm ? " · checked by an LLM" : ""}</div></div>`;
+  });
+  const nf = Object.entries(d.not_generated || {});
+  if (nf.length) h += `<div class="msg">Not generated: ${nf.map(([k, v]) => esc(k) + " (" + esc(v) + ")").join("; ")}</div>`;
+  $("out").innerHTML = h;
+}
+
+$("form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const chosen = [...document.querySelectorAll('input[name=mut]:checked')].map(x => x.value);
+  const names = [];
+  chosen.forEach(m => {  // ticked operators of a chosen mutation replace the whole-mutation choice
+    const ops = [...document.querySelectorAll(`input[data-m=${m}]:checked`)].map(x => x.value);
+    names.push(...(ops.length ? ops : [m]));
+  });
+  if (!names.length) { $("out").innerHTML = `<div class="msg err">Choose at least one mutation.</div>`; return; }
+  const body = { question: $("q").value, answer: $("a").value, evidence: $("e").value, mutations: names,
+    composite: $("comp").checked, premise_kind: $("pk").value,
+    depth: $("dp").value ? +$("dp").value : null, seed: $("sd").value ? +$("sd").value : null, randomize: !$("sd").value };
+  const btn = $("go"); btn.disabled = true; btn.textContent = "Working… (can take 10–40 s)"; $("out").innerHTML = "";
+  try {
+    const res = await fetch("/api/mutate", { method: "POST", headers: { "Content-Type": "application/json", "X-Token": $("tk").value }, body: JSON.stringify(body) });
+    const d = await res.json();
+    if (!res.ok) throw new Error(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+    render(d);
+  } catch (err) { $("out").innerHTML = `<div class="msg err">${esc(err.message)}</div>`; }
+  btn.disabled = false; btn.textContent = "Mutate";
+});
+init();
+</script>
+</body>
+</html>
