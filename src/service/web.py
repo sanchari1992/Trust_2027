@@ -19,7 +19,9 @@ class MutateRequest(BaseModel):
     mutations: List[str] = Field(["elaborate", "colloquial", "premise"],
                                  description="Mutation names (elaborate, colloquial, premise) and/or operator names (typos, ...).")
     composite: bool = Field(False, description="Also return all chosen mutations applied together in one prompt.")
-    premise_kind: str = Field("either", description="either | correct | incorrect (what the user states in Premise).")
+    premise_kind: str = Field("either", description="What Premise adds: either | correct | incorrect (a statement by the user) | patient_fits | patient_conflicts | patient_either (a patient profile).")
+    patient_profile: str = Field("", description="Optional: your own patient profile text, e.g. 'I am a 7-year-old girl.' It is used as the Premise.")
+    profile_relation: str = Field("fits", description="For patient_profile: 'fits' (answer unchanged) or 'conflicts' (expected answer: Cannot be answered from given information.).")
     depth: Optional[int] = Field(None, description="How many operators to stack (1-4); empty = default.")
     seed: Optional[int] = Field(None, description="Fixed seed for a repeatable result.")
     randomize: bool = Field(True, description="true = a different result each time; false = repeatable.")
@@ -43,7 +45,8 @@ def create_app(cfg, token=None, chat=None):
             raise HTTPException(401, "Wrong or missing token.")
         try:
             return service.mutate(req.question, req.answer, req.evidence, req.mutations, req.composite,
-                                  req.premise_kind, req.depth, req.seed, req.randomize)
+                                  req.premise_kind, req.depth, req.seed, req.randomize,
+                                  req.patient_profile, req.profile_relation)
         except RequestError as e:
             raise HTTPException(400, str(e))
         except Exception as e:  # LLM key missing, network, ...

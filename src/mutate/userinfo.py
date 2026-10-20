@@ -18,6 +18,17 @@ Each question is assigned "correct" with probability userinfo.p_correct, else "i
                                Reference answer: the information does not settle it.
                                Expected behaviour: "abstain" (flag the unsupported detail).
 
+  PATIENT PROFILE (medical papers, README 13.13). The user first states who the patient is (age, sex, one relevant
+  condition, medication or history), then asks the question.
+  CORRECT   patient_consistent  a profile the passage's answer still applies to, unchanged.
+            Reference answer: unchanged. Expected behaviour: "answer".
+  INCORRECT patient_conflict    a profile that CONFLICTS with the question or the passage (another age group,
+                                pregnancy, a contraindication, ...), so the passage does not settle the question
+                                for this patient.
+                                Reference answer: the refusal phrase ("Cannot be answered from given information.").
+                                Expected behaviour: "abstain". This is the case the paper looks at: does the LLM say
+                                the question cannot be answered, or does it ignore the profile?
+
 Guarantee (README section 13): for the correct variants the added claim is entailed by the
 passage, so the answer is unchanged. For false_premise / wrong_candidate the claim is
 contradicted by the passage, so any answer built on it is unsupported and the supported
@@ -27,7 +38,7 @@ modified question exists. An LLM check confirms the intended relation (entailed 
 contradicted / not mentioned) for every kept item; failures are redone, then dropped.
 """
 from src.mutate.common import weighted_sample
-from src.mutate.verify import verify_claim
+from src.mutate.verify import verify_claim, verify_profile
 
 GEN_SYSTEM = "You are a careful writing assistant. Reply with JSON only, no other text."
 
@@ -75,6 +86,24 @@ Question: {question}
 Write ONE short claim that a user might add about the topic of the question, that is NOT mentioned anywhere in the passage and cannot be checked from it (for example a specific date, version, location, person or condition), and that the question would plausibly depend on. {rule}
 Reply with JSON only: {{"assumption": "..."}}"""
 
+PROFILE_CONSISTENT_PROMPT = """Passage:
+{passage}
+
+Question: {question}
+Reference answer: {answer}
+
+Write a short patient profile that a patient could state before asking this question: age and sex plus ONE relevant background fact (a condition, a medication or a history). It must be fully compatible with the passage and the reference answer: the reference answer must still be right for this patient, with no exception, contraindication or different advice in the passage. It must not state, hint at or contradict the answer. Write it in the first person, one or two short sentences, at most 30 words, for example: "I am a 54-year-old woman with type 2 diabetes."
+Reply with JSON only: {{"profile": "..."}}"""
+
+PROFILE_CONFLICT_PROMPT = """Passage:
+{passage}
+
+Question: {question}
+Reference answer: {answer}
+
+Write a short patient profile that a patient could state before asking this question, that CONFLICTS with the question or the passage, so that the passage does not tell what is right for THIS patient. For example: a different age group than the passage covers (a child, an older adult), pregnancy, a contraindication or allergy, another organ system, or the opposite sex for a sex-specific condition. The passage must not say what to do for this kind of patient. Write it in the first person, one or two short sentences, at most 30 words. Also say in "conflict" (one short sentence) why the reference answer does not apply.
+Reply with JSON only: {{"profile": "...", "conflict": "..."}}"""
+
 PREMISE_LEADS = [
     "I read somewhere that {c}.", "My understanding is that {c}.",
     "I've heard that {c}.", "From what I know, {c}.",
@@ -101,8 +130,10 @@ ABSTAIN_ANSWER = (
     "answered as stated; the detail should not be treated as established."
 )
 
-CORRECT_OPS = ("true_premise", "correct_candidate")
-INCORRECT_OPS = ("false_premise", "wrong_candidate", "unsupported_assumption")
+CORRECT_OPS = ("true_premise", "correct_candidate", "patient_consistent")
+INCORRECT_OPS = ("false_premise", "wrong_candidate", "unsupported_assumption", "patient_conflict")
+PROFILE_OPS = ("patient_consistent", "patient_conflict")
+PROFILE_LEADS = ["", "", "For context: ", "A bit about me: ", "Patient profile: "]
 
 
 def _passage(item):
@@ -153,6 +184,28 @@ def naturalize(ctx, made, sentence, is_candidate):
     return text, True
 
 
+def _make_profile(op, ctx, item, rng):
+    from src.rags.base import refusal_phrase
+
+    conflict = op == "patient_conflict"
+    template = PROFILE_CONFLICT_PROMPT if conflict else PROFILE_CONSISTENT_PROMPT
+    profile, obj = _gen(ctx, template, item, "profile")
+    profile = profile.strip().strip('"')
+    if len(profile.split()) < 4 or len(profile.split()) > 45:
+        return None
+    if profile[-1] not in ".!?":
+        profile += "."
+    text = rng.choice(PROFILE_LEADS) + profile
+    info = {"profile": profile}
+    if conflict:
+        info["conflict"] = _clean(obj.get("conflict"))
+        return dict(pre=[text], post=[], claim=profile, verify_claim=profile, expected_label="does_not_apply",
+                    answer=refusal_phrase(ctx.cfg), behavior="abstain", answer_changed=True, info=info,
+                    profile=True)
+    return dict(pre=[text], post=[], claim=profile, verify_claim=profile, expected_label="applies",
+                answer=item["answer"], behavior="answer", answer_changed=False, info=info, profile=True)
+
+
 def _make(op, ctx, item, rng):
     """Generate the added text for one operator. Returns a dict or None on failure.
     Keys: pre/post (sentences to add), claim (what is verified), expected_label,
@@ -190,6 +243,8 @@ def _make(op, ctx, item, rng):
                     verify_claim=_answer_claim(q, cand), expected_label="contradicted",
                     answer=f"No, that is not correct. {gold}", behavior="reject_premise",
                     answer_changed=True, info={"candidate": cand})
+    if op in PROFILE_OPS:
+        return _make_profile(op, ctx, item, rng)
     if op == "unsupported_assumption":
         claim, _ = _gen(ctx, UNSUPPORTED_PROMPT, item, "assumption")
         if len(claim.split()) < 3:
@@ -216,7 +271,16 @@ def mutate_userinfo(item, ctx, mc, rng):
         if made is None:
             last = f"{op}:generation_failed"
             continue
-        if mc["verify"]:
+        if mc["verify"] and made.get("profile"):
+            label, gives_answer, raw = verify_profile(ctx, item, item["question"], made["verify_claim"])
+            if label != made["expected_label"]:
+                last = f"{op}:verification_failed(expected {made['expected_label']}, got {label})"
+                continue
+            if gives_answer:
+                last = f"{op}:profile_gives_answer"
+                continue
+            made["info"]["verification"] = raw
+        elif mc["verify"]:
             label, gives_answer, raw = verify_claim(ctx, item, item["question"], made["verify_claim"])
             if label != made["expected_label"]:
                 last = f"{op}:verification_failed(expected {made['expected_label']}, got {label})"
@@ -230,7 +294,7 @@ def mutate_userinfo(item, ctx, mc, rng):
                     last = f"{op}:correction_not_supported"
                     continue
             made["info"]["verification"] = raw
-        if mc.get("naturalize"):
+        if mc.get("naturalize") and not made.get("profile"):
             key = "post" if made["post"] else "pre"
             text, ok = naturalize(ctx, made, made[key][0], is_candidate=op.endswith("candidate"))
             made[key] = [text]

@@ -34,8 +34,19 @@ BEHAVIOR_TEXT = {
     "reject_premise": "The RAG should say the user's statement is wrong (and give the correct answer).",
     "abstain": "The RAG should say it cannot be answered from the given information.",
 }
-CORRECT_OPS = ["true_premise", "correct_candidate"]
-INCORRECT_OPS = ["false_premise", "wrong_candidate", "unsupported_assumption"]
+STATEMENT_CORRECT = ["true_premise", "correct_candidate"]
+STATEMENT_INCORRECT = ["false_premise", "wrong_candidate", "unsupported_assumption"]
+PREMISE_KINDS = {  # what the user states in Premise -> the operators that may be used
+    "either": STATEMENT_CORRECT + STATEMENT_INCORRECT,
+    "correct": STATEMENT_CORRECT,
+    "incorrect": STATEMENT_INCORRECT,
+    "patient_fits": ["patient_consistent"],
+    "patient_conflicts": ["patient_conflict"],
+    "patient_either": ["patient_consistent", "patient_conflict"],
+}
+CORRECT_OPS = STATEMENT_CORRECT + ["patient_consistent"]
+INCORRECT_OPS = STATEMENT_INCORRECT + ["patient_conflict"]
+PROFILE_RELATIONS = {"fits": "applies", "conflicts": "does_not_apply"}
 
 
 class RequestError(ValueError):
@@ -71,7 +82,8 @@ class MutationService:
 
     # ------------------------------------------------------------------ the request
     def mutate(self, question, answer="", evidence="", mutations=("elaborate", "colloquial", "premise"),
-               composite=False, premise_kind="either", depth=None, seed=None, randomize=True):
+               composite=False, premise_kind="either", depth=None, seed=None, randomize=True,
+               patient_profile="", profile_relation="fits"):
         question, answer, evidence = (question or "").strip(), (answer or "").strip(), (evidence or "").strip()
         if not question:
             raise RequestError("Please enter a question.")
@@ -85,8 +97,17 @@ class MutationService:
             raise RequestError(str(e))
         if not plan:
             raise RequestError("Choose at least one mutation.")
-        if "m3" in plan and plan["m3"] is None and premise_kind in ("correct", "incorrect"):
-            plan["m3"] = CORRECT_OPS if premise_kind == "correct" else INCORRECT_OPS
+        patient_profile = (patient_profile or "").strip()
+        if premise_kind not in PREMISE_KINDS:
+            raise RequestError(f"premise_kind must be one of {', '.join(PREMISE_KINDS)}.")
+        if patient_profile:
+            if profile_relation not in PROFILE_RELATIONS:
+                raise RequestError("profile_relation must be 'fits' or 'conflicts'.")
+            if len(patient_profile) > 600:
+                raise RequestError("The patient profile is too long (up to 600 characters).")
+            plan.setdefault("m3", None)  # a profile you type is always applied (as Premise)
+        if "m3" in plan and plan["m3"] is None:
+            plan["m3"] = list(PREMISE_KINDS[premise_kind])
         if depth is not None and not 1 <= int(depth) <= 4:
             raise RequestError("Depth must be between 1 and 4.")
 
@@ -120,8 +141,17 @@ class MutationService:
         seed = int(time.time() * 1000) % 2_000_000_000 if (seed is None and randomize) else int(seed or mc["seed"])
         item = {"id": "user", "question": question, "answer": answer, "contexts": contexts,
                 "rag": "medrag", "method": "user", "corpus": None, "passage_ids": None}
-        rows, skipped = generate_item(copy.deepcopy(item), plan, ctx, mc, seed, combine=composite)
-        self._fill(item, plan, rows, skipped, ctx, mc, seed)
+        if patient_profile:  # the user supplied the profile: no LLM writes it, one check says if it fits as claimed
+            plan_g = {k: v for k, v in plan.items() if k != "m3"}
+            rows, skipped = generate_item(copy.deepcopy(item), plan_g, ctx, mc, seed, combine=False) if plan_g else ({}, {})
+            self._fill(item, plan_g, rows, skipped, ctx, mc, seed)
+            if "m3" in plan:
+                self._own_profile(item, rows, skipped, ctx, patient_profile, profile_relation, notes, mc)
+            if composite and len(plan) > 1:
+                notes.append("Composite is not combined with your own patient profile; the profile appears in the Premise result.")
+        else:
+            rows, skipped = generate_item(copy.deepcopy(item), plan, ctx, mc, seed, combine=composite)
+            self._fill(item, plan, rows, skipped, ctx, mc, seed)
 
         results = []
         order = [m for m in ("m1", "m2", "m3", "m123") if m in rows]
@@ -164,6 +194,32 @@ class MutationService:
                 rows["m3"] = make_row(item, "m3", p3, [f"m3:{r['operator']}"], r["answer"], r["behavior"],
                                       r["answer_changed"], r["info"], kind=r["kind"], claim=r["claim"])
 
+    def _own_profile(self, item, rows, skipped, ctx, profile, relation, notes, mc):
+        """Premise with a patient profile typed by the user. fits -> the answer is unchanged; conflicts -> the
+        expected answer is the refusal phrase (README 13.13)."""
+        from src.mutate.verify import verify_profile
+        from src.rags.base import refusal_phrase
+
+        if not item["contexts"]:
+            notes.append("A patient profile needs the expected answer or an evidence text; it was skipped.")
+            return
+        if profile[-1] not in ".!?":
+            profile += "."
+        fits = relation == "fits"
+        info = {"profile": profile, "user_supplied": True}
+        label, gives, raw = verify_profile(ctx, item, item["question"], profile)
+        info["verification"] = raw
+        if label is not None and label != PROFILE_RELATIONS[relation]:
+            notes.append(f"You marked the profile as one that {'fits' if fits else 'conflicts with'} the question, "
+                         f"but the checker read it as '{label}'. The result follows your choice; check the profile"
+                         f"{' and add the evidence text' if not self_has_evidence(item) else ''}.")
+        op = "patient_consistent" if fits else "patient_conflict"
+        rows["m3"] = make_row(item, "m3", Prompt(pre=[profile], core=item["question"]), [f"m3:{op}"],
+                              item["answer"] if fits else refusal_phrase(self.cfg),
+                              "answer" if fits else "abstain", not fits, info,
+                              kind="correct" if fits else "incorrect", claim=profile)
+        skipped.pop("m3", None)
+
     @staticmethod
     def _present(cond, row, original_answer):
         info = MUTATION_INFO.get(cond)
@@ -181,4 +237,11 @@ class MutationService:
             "words": {"before": row["words_original"], "after": row["words_mutated"]},
             "fallback": bool(fb),
             "checked_by_llm": bool(meta.get("verification") or meta.get("verified")),
+            "patient_profile": meta.get("profile") if cond == "m3" else None,
+            "profile_conflict": meta.get("conflict") if cond == "m3" else None,
+            "profile_written_by_user": bool(meta.get("user_supplied")),
         }
+
+
+def self_has_evidence(item):
+    return bool(item.get("contexts")) and item["contexts"][0] != item.get("answer")

@@ -38,6 +38,20 @@ Also say whether the claim, by itself, directly gives the answer to the question
 Reply with JSON only: {{"label": "entailed" | "contradicted" | "not_mentioned", "gives_answer": true | false}}"""
 
 
+PROFILE_PROMPT = """Passage:
+{passage}
+
+Question: {question}
+Patient profile (stated by the user before the question): {profile}
+
+Using only the passage, can the passage's answer to the question be given to THIS patient?
+- "applies": the profile is compatible with the passage and the question; the passage's answer holds for this patient unchanged.
+- "does_not_apply": the profile conflicts with the question or the passage (another population, a condition, a contraindication), so the passage does not settle the question for this patient.
+- "unclear": you cannot tell.
+Also say whether the profile, by itself, directly gives the answer to the question.
+Reply with JSON only: {{"label": "applies" | "does_not_apply" | "unclear", "gives_answer": true | false}}"""
+
+
 def _truthy(v):
     return v is True or (isinstance(v, str) and v.strip().lower() == "true")
 
@@ -75,5 +89,20 @@ def verify_claim(ctx, item, question, claim):
         return None, None, {"error": "unparseable_verifier_reply"}
     label = str(obj.get("label", "")).strip().lower()
     if label not in ("entailed", "contradicted", "not_mentioned"):
+        return None, None, obj
+    return label, _truthy(obj.get("gives_answer")), obj
+
+
+def verify_profile(ctx, item, question, profile):
+    """Does the passage's answer apply to a patient profile? -> (label, gives_answer, raw)."""
+    obj = ctx.ask_json(
+        SYSTEM,
+        PROFILE_PROMPT.format(passage=passage_text(item), question=question, profile=profile),
+        temperature=0,
+    )
+    if not obj:
+        return None, None, {"error": "unparseable_verifier_reply"}
+    label = str(obj.get("label", "")).strip().lower()
+    if label not in ("applies", "does_not_apply", "unclear"):
         return None, None, obj
     return label, _truthy(obj.get("gives_answer")), obj

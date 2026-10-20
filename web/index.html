@@ -55,6 +55,23 @@
 
     <label class="f">Mutations</label>
     <div class="muts" id="muts"></div>
+    <div class="mut" id="premisebox" style="margin-top:8px">
+      <b>Premise adds&hellip;</b><small style="display:block;color:var(--muted)">used when Premise is ticked</small>
+      <select id="pk" style="margin-top:6px">
+        <option value="either">a statement by the user: true, false or unsupported</option>
+        <option value="correct">a statement by the user: true (answer stays)</option>
+        <option value="incorrect">a statement by the user: false or unsupported (answer changes)</option>
+        <option value="patient_fits">a patient profile that FITS the question (answer stays)</option>
+        <option value="patient_conflicts">a patient profile that CONFLICTS with the question (expected: cannot be answered)</option>
+        <option value="patient_either">a patient profile: fits or conflicts</option>
+      </select>
+      <details><summary>Or type your own patient profile</summary>
+        <textarea id="pp" placeholder="e.g. I am a 7-year-old girl with asthma." style="margin-top:8px"></textarea>
+        <select id="pr" style="margin-top:6px"><option value="fits">it fits the question (answer unchanged)</option>
+          <option value="conflicts">it conflicts with the question (expected answer: Cannot be answered from given information.)</option></select>
+        <div class="hint" style="margin-top:4px">Used instead of a generated one. A quick check tells you if the profile looks like you described.</div>
+      </details>
+    </div>
     <div class="mut" style="margin-top:8px"><label><input type="checkbox" id="comp">
       <span><b>Composite</b><small>all chosen mutations together in one prompt</small></span></label></div>
 
@@ -62,8 +79,6 @@
       <summary>More options</summary>
       <div id="opsbox"></div>
       <div class="row">
-        <div><label class="f" for="pk">Premise should be</label>
-          <select id="pk"><option value="either">either correct or incorrect</option><option value="correct">correct (answer stays)</option><option value="incorrect">incorrect (answer changes)</option></select></div>
         <div><label class="f" for="dp">How many operators to stack <span class="hint">(blank = default)</span></label>
           <input type="number" id="dp" min="1" max="4"></div>
       </div>
@@ -109,11 +124,11 @@ function render(d) {
     const ans = r.expected_answer ?? "(no reference answer was given)";
     h += `<div class="card res"><h2>${esc(r.name)}
       ${r.fallback ? '<span class="tag fb">simple fallback used</span>' : ""}
-      ${r.premise_kind ? `<span class="tag">${esc(r.premise_kind)} premise</span>` : ""}</h2>
+      ${r.patient_profile ? `<span class="tag">patient profile${r.profile_written_by_user ? " (yours)" : ""}</span>` : (r.premise_kind ? `<span class="tag">${esc(r.premise_kind)} premise</span>` : "")}</h2>
       <div class="block"><div class="t"><span>Mutated prompt</span>${copyBtn("p" + i)}</div><div class="box" id="p${i}">${esc(r.prompt)}</div></div>
       <div class="block"><div class="t"><span>New expected answer</span>${copyBtn("x" + i)}</div><div class="box" id="x${i}">${esc(ans)}</div></div>
       <div class="beh"><b class="${same ? "same" : "changed"}">${same ? "Answer unchanged." : "Answer changed."}</b> ${esc(r.expected_behavior_text)}</div>
-      <div class="meta">Operators: ${r.operators.map(esc).join(", ") || "none"} · ${r.words.before} → ${r.words.after} words${r.checked_by_llm ? " · checked by an LLM" : ""}</div></div>`;
+      ${r.profile_conflict ? `<div class="meta">Why the profile conflicts: ${esc(r.profile_conflict)}</div>` : ""}<div class="meta">Operators: ${r.operators.map(esc).join(", ") || "none"} · ${r.words.before} → ${r.words.after} words${r.checked_by_llm ? " · checked by an LLM" : ""}</div></div>`;
   });
   const nf = Object.entries(d.not_generated || {});
   if (nf.length) h += `<div class="msg">Not generated: ${nf.map(([k, v]) => esc(k) + " (" + esc(v) + ")").join("; ")}</div>`;
@@ -130,7 +145,7 @@ $("form").addEventListener("submit", async e => {
   });
   if (!names.length) { $("out").innerHTML = `<div class="msg err">Choose at least one mutation.</div>`; return; }
   const body = { question: $("q").value, answer: $("a").value, evidence: $("e").value, mutations: names,
-    composite: $("comp").checked, premise_kind: $("pk").value,
+    composite: $("comp").checked, premise_kind: $("pk").value, patient_profile: $("pp").value, profile_relation: $("pr").value,
     depth: $("dp").value ? +$("dp").value : null, seed: $("sd").value ? +$("sd").value : null, randomize: !$("sd").value };
   const btn = $("go"); btn.disabled = true; btn.textContent = "Working… (can take 10–40 s)"; $("out").innerHTML = "";
   try {

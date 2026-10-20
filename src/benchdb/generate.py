@@ -134,10 +134,9 @@ def build_mutation_cfg(cfg, plan, depth=None, p_correct=None, target_length=None
         else:
             c, i = mc[fam]["correct_operators"], mc[fam]["incorrect_operators"]
             if ops is not None:
-                for op in list(c):
-                    c[op] = c[op] if op in ops else 0.0
-                for op in list(i):
-                    i[op] = i[op] if op in ops else 0.0
+                for pool in (c, i):  # an operator that is chosen explicitly is on, even if its config weight is 0
+                    for op in list(pool):
+                        pool[op] = (pool[op] or 1.0) if op in ops else 0.0
                 has_c, has_i = any(v > 0 for v in c.values()), any(v > 0 for v in i.values())
                 if has_c and not has_i:
                     mc[fam]["p_correct"] = 1.0

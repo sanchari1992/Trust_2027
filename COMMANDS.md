@@ -80,3 +80,5 @@ Refusals (README 14.10): the counts of "Cannot be answered from given informatio
 To switch the sentence off: `medrag.refusal_instruction: false` in `config.yaml`.
 
 Mutation web page / API (README 34): `python scripts/serve_mutator.py` then open http://127.0.0.1:8000 (API docs at /docs). Needs `pip install fastapi uvicorn`.
+
+Patient profiles (README 13.13): the `paper` and `pilot` profiles now include the `patient_consistent` / `patient_conflict` Premise operators. Mutate with `--fresh` after upgrading. Generate only these from a database: `python scripts/gen_bench.py --db my.benchmark --mutation patient_conflict`. In the web page: "Premise adds ... a patient profile".

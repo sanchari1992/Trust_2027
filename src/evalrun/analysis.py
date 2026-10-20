@@ -244,9 +244,13 @@ def m3_table(df):
     if d.empty:
         return pd.DataFrame()
     d["m3_operator"] = d["operators"].apply(lambda o: next((x for x in (o or []) if str(x).startswith("m3:")), None))
+    d["refused"] = pd.to_numeric(d["refused"], errors="coerce") if "refused" in d else np.nan
+    # refusal_rate = share answered with the exact refusal phrase. For patient_conflict this is the number the
+    # patient-profile experiment is about (README 13.13); for patient_consistent it should be low.
     return (d.groupby(["condition", "kind", "m3_operator"], observed=True)
               .agg(n=("id", "size"), hallucination_rate=("hallucinated", "mean"),
-                   failure_rate=("failed", "mean"), unfaithful_rate=("unfaithful", "mean"))
+                   failure_rate=("failed", "mean"), unfaithful_rate=("unfaithful", "mean"),
+                   refusal_rate=("refused", "mean"))
               .reset_index())
 
 

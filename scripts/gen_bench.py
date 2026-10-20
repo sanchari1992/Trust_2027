@@ -13,7 +13,7 @@ reference answer for the mutated prompt and the behaviour that counts as correct
 MUTATIONS (--mutation, comma separated; names, ids, or single operators; 'all'):
     elaborate (m1, length)       restate | background | instruction | appositive      longer, on-topic prompts
     colloquial (m2, linguistic)  typos | casual | first_person | politeness | imperative | synonyms
-    premise (m3, userinfo)       true_premise | correct_candidate | false_premise | wrong_candidate | unsupported_assumption
+    premise (m3, userinfo)       true_premise | correct_candidate | false_premise | wrong_candidate | unsupported_assumption | patient_consistent | patient_conflict
     --combine                    also write the Composite prompt: every chosen mutation in ONE prompt
 TUNING:
     --depth N        operators stacked per prompt in Elaborate and Colloquial (Premise always adds one claim)

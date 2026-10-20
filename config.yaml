@@ -212,10 +212,12 @@ mutation:
     correct_operators:
       true_premise: 1.0           # the user states a true fact from the passage (not the answer)
       correct_candidate: 1.0      # the user offers the correct answer and asks to confirm
+      patient_consistent: 0.0     # MEDICAL: the user first states a patient profile the passage's answer still applies to (answer unchanged). 0 = off here; the paper and pilot profiles switch it on (README 13.13)
     incorrect_operators:
       false_premise: 1.0          # the user states a false fact that contradicts the passage
       wrong_candidate: 1.0        # the user offers a wrong answer and asks to confirm
       unsupported_assumption: 1.0 # the user adds a detail the passage never mentions (the question cannot be settled)
+      patient_conflict: 0.0       # MEDICAL: the user first states a patient profile that conflicts with the question/passage (another age group, pregnancy, contraindication...): the expected answer is "Cannot be answered from given information." 0 = off here; on in the paper and pilot profiles
     verify: true                  # LLM check that each claim is entailed / contradicted / not mentioned as intended
     naturalize: true              # an LLM rewrites the added sentence in a natural voice (rule-checked: the claim's words and numbers must survive, else the template sentence is kept); 1 extra call per question
 
@@ -310,6 +312,9 @@ profiles:
       concurrency: 16
     mutation:
       output_dir: results/mutations_paper
+      userinfo:                      # patient-profile premises (README 13.13) are part of the medical paper
+        correct_operators: {patient_consistent: 1.0}
+        incorrect_operators: {patient_conflict: 1.0}
       concurrency: 16
     evaluation:
       output_dir: results/eval_paper
@@ -328,6 +333,9 @@ profiles:
       output_dir: results/benchmarks_pilot
     mutation:
       output_dir: results/mutations_pilot
+      userinfo:                      # patient-profile premises (README 13.13) are part of the medical paper
+        correct_operators: {patient_consistent: 1.0}
+        incorrect_operators: {patient_conflict: 1.0}
     evaluation:
       output_dir: results/eval_pilot
       sample_per_file: null

@@ -55,8 +55,8 @@ MUTATION_INFO = {
            "what": "rewrites how the question is worded (typos, casual register, first person, request form)"},
     "m3": {"name": "Premise", "family": "userinfo", "aliases": ["m3", "userinfo", "premise", "user-premise"],
            "operators": ["true_premise", "correct_candidate", "false_premise", "wrong_candidate",
-                         "unsupported_assumption"],
-           "what": "the user states something first: a true fact, a wrong or unsupported one"},
+                         "unsupported_assumption", "patient_consistent", "patient_conflict"],
+           "what": "the user states something first: a true fact, a wrong or unsupported one, or a patient profile that fits or conflicts with the question"},
 }
 OPERATOR_OWNER = {op: mid for mid, info in MUTATION_INFO.items() for op in info["operators"]}
 COMBINED_NAME = "Composite"  # all selected mutations in one prompt (condition m123)
