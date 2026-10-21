@@ -82,6 +82,7 @@ def evaluate(rag_name, method, cfg, rag_obj=None, conds=None, limit=None, fresh=
 
     rag = rag_obj or get_rag(rag_name, cfg)
     judge = Judge(cfg)
+    print(f"judge: {judge.id}")
     summary = {}
     for cond in usable:
         out = eval_file(cfg, cond, rag_name, method)
@@ -90,12 +91,16 @@ def evaluate(rag_name, method, cfg, rag_obj=None, conds=None, limit=None, fresh=
             out.unlink(missing_ok=True)
         existing = read_jsonl(out)
         current = rows[cond]
+        legacy = f"llm:{cfg['llm']['model']}"  # results stored before the judge was recorded were judged by llm:
         keep = [r for r in existing if r["id"] in current
                 and r.get("question") == current[r["id"]]["question"]
-                and r.get("reference_answer") == current[r["id"]]["answer"]]
+                and r.get("reference_answer") == current[r["id"]]["answer"]
+                and (r.get("judge") or legacy) == judge.id]
         if len(keep) < len(existing):
-            print(f"  dropped {len(existing) - len(keep)} stored result(s) whose question or reference "
-                  f"answer has changed since they were evaluated; they will be redone")
+            other = sum(1 for r in existing if (r.get("judge") or legacy) != judge.id)
+            print(f"  dropped {len(existing) - len(keep)} stored result(s) that will be redone: "
+                  f"{other} were judged by another judge (now {judge.id}), the others have a changed question "
+                  f"or reference answer")
             tmp = out.with_suffix(".tmp")
             tmp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in keep), encoding="utf-8")
             tmp.replace(out)
@@ -127,7 +132,7 @@ def evaluate(rag_name, method, cfg, rag_obj=None, conds=None, limit=None, fresh=
                     "expected_behavior": row.get("expected_behavior") or "answer",
                     "operators": row.get("operators") or [], "kind": row.get("kind"),
                     "answer_changed": row.get("answer_changed", False),
-                    "response": res.get("answer"),
+                    "response": res.get("answer"), "judge": judge.id,
                     "n_contexts": len(res.get("contexts") or []),
                     "n_source_contexts": len(res.get("source_contexts") or []),
                     **dict(zip(("gold_recall", "retrieval_hit"), retrieval_scores(

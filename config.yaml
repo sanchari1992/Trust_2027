@@ -237,7 +237,15 @@ evaluation:
     raptor: 4
     medrag: 8
   judge_concurrency: 8            # judge calls in parallel
-  judge_llm: null                 # judge with a DIFFERENT model than the one inside the RAGs, e.g. {model: ..., base_url: ..., api_key_env: ...}; null = same as llm:
+  judge_llm:                      # the JUDGE is a different model than the one inside the RAGs (llm: = DeepSeek generates, this one judges), so a model never grades its own answers. null = judge with llm: (README 14.12)
+    model: gpt-6-luna             # OpenAI's cheapest current model. Put OPENAI_API_KEY=... in the .env file
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    thinking: null                # null = do not send DeepSeek's "thinking" field to OpenAI
+    reasoning_effort: none        # GPT-6 reasons by default (billed as output tokens); none = answer directly, cheap and fast
+    token_param: max_completion_tokens   # OpenAI's name for the output limit
+    min_output_tokens: 1500       # every judge call may write at least this much (room in case the model reasons anyway)
+    send_temperature: true        # temperature 0 is sent; if the API refuses it, the call is repeated without it automatically
   faithfulness_threshold: 1.0     # an answer is UNFAITHFUL if its faithfulness score is below this (1.0 = any unsupported statement)
   max_context_chars: 60000        # retrieved context given to the faithfulness judge is cut at this length
   user_message_as_context: true   # a statement that only repeats what the USER said counts as supported (adopting a false claim is caught by the behaviour label). false = plain faithfulness against the retrieved context

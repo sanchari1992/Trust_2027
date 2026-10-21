@@ -82,3 +82,5 @@ To switch the sentence off: `medrag.refusal_instruction: false` in `config.yaml`
 Mutation web page / API (README 34): `python scripts/serve_mutator.py` then open http://127.0.0.1:8000 (API docs at /docs). Needs `pip install fastapi uvicorn`.
 
 Patient profiles (README 13.13): the `paper` and `pilot` profiles now include the `patient_consistent` / `patient_conflict` Premise operators. Mutate with `--fresh` after upgrading. Generate only these from a database: `python scripts/gen_bench.py --db my.benchmark --mutation patient_conflict`. In the web page: "Premise adds ... a patient profile".
+
+Two LLMs (README 14.12): DeepSeek generates (`llm:`), GPT-6 Luna judges (`evaluation.judge_llm`). Put both keys in `.env`: `DEEPSEEK_API_KEY=...` and `OPENAI_API_KEY=...`. Check the judge against a reference first: `python scripts/judge_agreement.py --profile pilot --rag medrag --n 200` (run the evaluate step with `evaluation.store_contexts: true` before). Changing the judge redoes the stored evaluation results. `judge_llm: null` = judge with DeepSeek as before.

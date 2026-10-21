@@ -152,6 +152,8 @@ class Judge:
         if self.ev.get("judge_llm"):  # judge with another model than the one inside the RAGs
             jcfg = {**cfg, "llm": {**cfg["llm"], **self.ev["judge_llm"]}}
         self.chat = partial(get_chat_func(jcfg), temperature=0)
+        # who judged: stored in every result row, so results judged by another judge are redone, never mixed
+        self.id = f"llm:{jcfg['llm']['model']}"
 
     # ---------------------------------------------------------------- faithfulness
     def _statements(self, question, answer):
@@ -287,3 +289,4 @@ class Judge:
             else:
                 out["faithfulness_source"] = self.faithfulness(row["question"], response, src)["faithfulness"]
         return out
+

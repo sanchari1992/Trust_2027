@@ -79,6 +79,8 @@ benchmark-plus/
 │   ├── build_union.py           union of RAGAS, ARES and DataMorgana questions                          section 31
 │   ├── paper_report.py          the whole evaluation story in one report + LaTeX tables                 section 32
 │   ├── paper_examples.py        example queries, entities, graph templates, mutations for the paper     section 32.4
+│   ├── judge_agreement.py       agreement of the judge (GPT-6 Luna) with a reference judge (kappa)       section 14.12
+│   ├── serve_mutator.py         web page + API: mutate one prompt, get the new expected answer           section 34
 │   └── run_all.py               the whole pipeline in order                    section 15
 ├── src/
 │   ├── config.py                reads config.yaml (+ profiles), builds folder names
@@ -904,7 +906,7 @@ Options of `evaluate_benchmarks.py`: `--conditions baseline,m1,...` (derived con
 | `evaluation.batch_size` | `32` | Questions answered between saves; an interrupted run resumes at the last save. |
 | `evaluation.rag_concurrency` | lightrag: `8`<br>raptor: `4`<br>medrag: `8` | Questions a RAG answers at once, per RAG. Lower these if you hit rate limits or run out of memory. |
 | `evaluation.judge_concurrency` | `8` | Judge calls in parallel. |
-| `evaluation.judge_llm` | `null` | Judge with a different model than the one inside the RAGs, e.g. `{model: ..., base_url: ..., api_key_env: ...}`. `null` = the model in `llm:`. A judge that is also the generator can favour its own answers; a separate judge is advisable for final results. |
+| `evaluation.judge_llm` | GPT-6 Luna (OpenAI) | The model that judges, separate from the one inside the RAGs (`llm:`, DeepSeek). Keys: `model`, `base_url`, `api_key_env`, `thinking`, `reasoning_effort`, `token_param`, `min_output_tokens`, `send_temperature`; the key goes in `.env` as `OPENAI_API_KEY`. `null` = judge with `llm:`. Section 14.12. |
 | `evaluation.faithfulness_threshold` | `1.0` | An answer is UNFAITHFUL if its faithfulness score is below this. `1.0` = any unsupported statement counts. |
 | `evaluation.user_message_as_context` | `true` | The user's message supports statements that only repeat it (section 14.2). `false` = plain faithfulness only. |
 | `evaluation.also_strict_faithfulness` | `true` | Also keep the plain score (one extra judge call per answer), so both versions can be reported. |
@@ -1072,9 +1074,46 @@ Together these cut a first evaluation by roughly a fifth to a quarter (an estima
 | `mutation.length.verify: false` | 1 check per Elaborate | the guarantee that Elaborate kept the question and its answer (not recommended) |
 | `mutation.max_retries: 1` | fewer regenerations | slightly fewer kept mutations |
 | `evaluation.also_strict_faithfulness: false` | the strict check on unfaithful answers | `hallucinated_strict`, the upper bound |
-| `evaluation.judge_llm` set to a cheaper model | price per judge call | the judge changes; re-judge everything with the same model |
+| `evaluation.judge_llm` set to a cheaper model (GPT-6 Luna by default) | price per judge call | the judge changes; re-judge everything with the same model |
 
 The cheapest way to spend less overall is order, not settings: run the **pilot** first (`bash run_paper.sh --pilot`), read its examples and counts, and only then start the paper run; use `--limit`/`--n` for every trial; and never mix a changed prompt with old results in the same folder (re-judging is then wasted).
+
+### 14.12 Two LLMs: DeepSeek generates, GPT-6 Luna judges
+
+Generation (indexing, answering, benchmark questions, mutation text and its checks) uses the model in `llm:` (DeepSeek). The **judge** (answer labels and faithfulness) uses `evaluation.judge_llm`, set by default to OpenAI's `gpt-6-luna`. A model that never grades its own answers is easier to defend in the paper.
+
+**Where to put the key.** Create or open the file `.env` in the repository root (next to `config.yaml`; it is read automatically) and put both keys in it:
+```
+DEEPSEEK_API_KEY=sk-...        # generation, mutation
+OPENAI_API_KEY=sk-...          # the judge (GPT-6 Luna); create it at platform.openai.com/api-keys, and add credit
+```
+The names are set by `llm.api_key_env` and `evaluation.judge_llm.api_key_env`. If the OpenAI key is missing, the evaluate step stops at the start and says which variable to set.
+
+**The settings** (`evaluation.judge_llm` in `config.yaml`):
+
+| Key | Default | What it does |
+|---|---|---|
+| `model` | `gpt-6-luna` | The judge. About $0.10 per million input tokens and $0.50 per million output tokens (OpenAI's page when this was written; check it). Batch/Flex is half that, but this pipeline calls the normal API. |
+| `base_url`, `api_key_env` | `https://api.openai.com/v1`, `OPENAI_API_KEY` | Where the judge is called and which `.env` variable holds its key. Any OpenAI-compatible provider works the same way. |
+| `thinking` | `null` | DeepSeek's "thinking" request field is left out for OpenAI. |
+| `reasoning_effort` | `none` | GPT-6 is a reasoning model and thinks at "medium" by default; those thinking tokens are billed as output and can use up the answer limit. `none` makes it answer directly: cheaper, faster and the judge replies are short anyway. |
+| `token_param` | `max_completion_tokens` | OpenAI's name for the output limit (`max_tokens` for DeepSeek). |
+| `min_output_tokens` | `1500` | Every judge call is allowed to write at least this much, as room in case the model reasons anyway. You pay only for tokens actually written. |
+| `send_temperature` | `true` | Temperature 0 is sent. If the API rejects a parameter (`temperature`, `reasoning_effort`, or the name of the output limit), the call is repeated without it or with the other name, and the change is remembered for the run. |
+
+To judge with DeepSeek again (as before), set `judge_llm: null`. To use another provider, change `model`, `base_url`, `api_key_env` (and set `reasoning_effort` to `null` and `token_param` to `max_tokens` if it is not an OpenAI reasoning model).
+
+**What changes in the numbers.** Judging differently changes the measurements, so the judge must be the same for the whole paper. Every result row records its `judge`. If you change the judge, results stored by the other judge are dropped and redone when you run the evaluate step again (it prints how many), because answers judged by two different judges must never be compared. This re-asks the RAG as well. Results from before this change count as judged by `llm:`, so the first run with GPT-6 Luna redoes them; use `--fresh` or a new `evaluation.output_dir` to be explicit. The mutation checks, which are not the judge, still use DeepSeek.
+
+**Cost.** One judged answer is about four to five judge calls, most of the tokens being the retrieved passages sent with the faithfulness checks. For the paper run (1,000 answers per method, three methods, six conditions, about 18,000 judged answers) a rough estimate is 120 million input and 12 million output tokens, about $18 at the prices above; the temperature-0 cache and refusals (which need no judge call) lower it. These token counts are an estimate, not a measurement: a pilot run prints the real totals. The run summary adds the judge's tokens to those of the RAG and mutation calls.
+
+**Check the judge before the big run.** A small cheap model can judge differently from a stronger one. `scripts/judge_agreement.py` judges a sample of stored answers a second time with a reference judge (default: DeepSeek; or any model via `--reference-llm`) and writes `results/judge_agreement/agreement.md` (label agreement and Cohen's kappa per expected behaviour, agreement on `correct`, `unfaithful` and `hallucinated`, the confusion between labels) and `label_disagreements.csv` (read these):
+```
+# the retrieved contexts must be stored for the faithfulness part: evaluation.store_contexts: true
+python scripts/run_all.py --profile pilot --rags medrag --n 200 --steps evaluate
+python scripts/judge_agreement.py --profile pilot --rag medrag --n 200
+```
+Report the kappa in the paper. As a guide, below about 0.6 the judge is not a safe choice; the disagreements show whether it is too strict or too lenient.
 
 ---
 
@@ -1193,7 +1232,8 @@ These three differ on purpose: graph-based, hierarchical-summary and flat retrie
 
 | Role | Model | Where |
 |---|---|---|
-| All LLM calls: index building, answering, benchmark generation, mutation writing and checking, judging | DeepSeek (`llm.model`, default `deepseek-flash`; thinking disabled; temperature 0 for answering and judging, 0 for generation, 0.3 for writing mutation text) | `llm:`; the judge can be a different model (`evaluation.judge_llm`) |
+| LLM calls: index building, answering, benchmark generation, mutation writing and checking | DeepSeek (`llm.model`, default `deepseek-flash`; thinking disabled; temperature 0 for answering, 0 for generation, 0.3 for writing mutation text) | `llm:` |
+| LLM calls: judging (answer labels, faithfulness) | OpenAI `gpt-6-luna` (reasoning effort none; temperature 0) | `evaluation.judge_llm` (section 14.12); `null` = DeepSeek |
 | Embeddings (LightRAG, RAPTOR, generator filters, M2 `synonyms` similarity gate) | `BAAI/bge-small-en-v1.5`, local | `embedding:` |
 | MedRAG retriever | MedCPT | inside MedRAG |
 | Text features | spaCy `en_core_web_sm` | `real_queries.spacy_model` |
