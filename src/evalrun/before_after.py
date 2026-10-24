@@ -197,10 +197,12 @@ METHOD_SHORT = {"ragas": "RAGAS", "ares": "ARES", "datamorgana": "DM"}  # short 
 RAG_LABEL = {"lightrag": "LightRAG", "raptor": "RAPTOR", "medrag": "MedRAG", "ALL": "All RAGs"}
 COND_SHORT = {"baseline": "", "m1": " + M1", "m2": " + M2", "m3": " + M3", "m123": " + M1,2,3 (one prompt)",
               "m_union": " + M1,2,3 (combined)",
-              "c_rerun": " + re-run", "c_pad": " + padding"}
+              "c_rerun": " + re-run", "c_rerun2": " + re-run 2", "c_rerun3": " + re-run 3",
+              "c_union": " + 3 re-runs (combined)", "c_pad": " + padding"}
 COND_GROUP = {"baseline": "Benchmark", "m1": "+ M1 (length)", "m2": "+ M2 (linguistic)",
               "m3": "+ M3 (user info)", "m123": "+ M1,2,3 (one prompt)", "m_union": "+ M1,2,3 (combined)",
-              "c_rerun": "Control: re-run", "c_pad": "Control: padding"}
+              "c_rerun": "Control: re-run", "c_rerun2": "Control: re-run 2", "c_rerun3": "Control: re-run 3",
+              "c_union": "Control: 3 re-runs (combined)", "c_pad": "Control: padding"}
 GRID_METRICS = [  # (key, column, title, only answer items?)
     ("hallucination", "hallucinated", "Hallucination rate", False),
     ("wrong_behavior", "wrong_behavior", "Wrong-behaviour rate (asserted wrong / adopted a false claim)", False),

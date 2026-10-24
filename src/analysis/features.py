@@ -10,7 +10,15 @@ from src.analysis.graph_features import get_nlp
 from src.analysis.lexical_features import NUMERIC_FEATURES as LEXICAL_FEATURES
 from src.analysis.lexical_features import extract as lexical_extract
 
-ALL_NUMERIC_FEATURES = GRAPH_FEATURES + LEXICAL_FEATURES
+from src.analysis.complexity_features import NUMERIC_FEATURES as COMPLEXITY_FEATURES
+from src.analysis.complexity_features import extract as complexity_extract
+
+ALL_NUMERIC_FEATURES = GRAPH_FEATURES + LEXICAL_FEATURES + COMPLEXITY_FEATURES
+# Pure size measures. They are NOT used to judge realism (a longer or shorter prompt is not a more or less realistic one):
+# the classifier and the deviation tables leave them out. They stay in the tables as descriptive columns.
+LENGTH_FEATURES = ["char_len", "word_len", "n_tokens", "n_nodes", "n_edges", "n_sentences", "n_sentences_punct",
+                   "n_question_marks"]
+REALISM_FEATURES = [f for f in ALL_NUMERIC_FEATURES if f not in LENGTH_FEATURES]
 
 
 def load_questions(path, text_field="text", limit=None):
@@ -37,7 +45,7 @@ def compute_features(rows, text_field, spacy_model, show_progress=True):
     out = []
     for i, row in enumerate(rows):
         text = row[text_field]
-        feats = {**graph_extract(text, nlp), **lexical_extract(text)}
+        feats = {**graph_extract(text, nlp), **lexical_extract(text), **complexity_extract(text, nlp(text))}
         feats["id"] = row.get("id", i)
         out.append(feats)
         if show_progress and (i + 1) % 500 == 0:

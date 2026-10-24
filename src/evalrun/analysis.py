@@ -28,19 +28,26 @@ UNION_MAX = ["hallucinated", "failed", "unfaithful", "abstained", "refused", "wr
              "unfaithful_strict", "unsupported_but_correct", "unfaithful_and_wrong", "retrieval_miss"]
 UNION_MIN = ["faithfulness", "faithfulness_strict", "retrieval_hit", "gold_recall"]
 UNION_PARTS = ["baseline", "m1", "m2", "m3"]
+UNION_SPECS = {"m_union": UNION_PARTS, "c_union": ["baseline", "c_rerun", "c_rerun2", "c_rerun3"]}
 
 
 def add_union_condition(df):
+    for name, parts in UNION_SPECS.items():
+        df = _add_union(df, name, parts)
+    return df
+
+
+def _add_union(df, name, parts):
     """DERIVED condition m_union, per question: failing if it fails in the unchanged benchmark OR in any of the
     three single-mutation runs (maximum of every bad outcome, minimum of faithfulness / retrieval). Uses only
     questions that have all four versions. Nothing is evaluated: this is the 'benchmark + added incorrect
     questions of M1 + M2 + M3' count, without double counting a question that fails under two mutations."""
     present = set(df["condition"].astype(str))
-    if "m_union" in present or not all(p in present for p in UNION_PARTS):
+    if name in present or not all(p in present for p in parts):
         return df
     key = ["rag", "method", "id"]
-    d = df[df["condition"].astype(str).isin(UNION_PARTS)]
-    d = d[d.groupby(key)["condition"].transform("nunique") == len(UNION_PARTS)]
+    d = df[df["condition"].astype(str).isin(parts)]
+    d = d[d.groupby(key)["condition"].transform("nunique") == len(parts)]
     if d.empty:
         return df
     d = d.copy()
@@ -52,7 +59,7 @@ def add_union_condition(df):
     u = d.groupby(key).agg(agg).reset_index()
     base = d[d["condition"].astype(str) == "baseline"].drop_duplicates(key).set_index(key)
     u = u.merge(base[["expected_behavior"]].reset_index(), on=key, how="left")
-    u["condition"], u["question"], u["kind"], u["response"] = "m_union", "(derived)", None, None
+    u["condition"], u["question"], u["kind"], u["response"] = name, "(derived)", None, None
     u["operators"] = [["union"]] * len(u)
     u["correct"] = 1.0 - u["failed"]
     u["label"] = None

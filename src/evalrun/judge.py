@@ -263,7 +263,10 @@ class Judge:
             out["judge_error"] = True
             return out
         out["label"] = label
-        out["correct"] = label not in FAILURE_LABELS[behavior]
+        conflict = any("patient_conflict" in o for o in (row.get("operators") or []))
+        # patient_conflict: giving the standard answer as if the profile did not matter is the failure being tested
+        failing = FAILURE_LABELS["abstain"] | {"answered_core"} if conflict else FAILURE_LABELS[behavior]
+        out["correct"] = label not in failing
         if label in SKIP_FAITHFULNESS or not response.strip():
             faith = {"faithfulness": 1.0, "faithfulness_strict": 1.0, "n_statements": 0, "n_supported": 0,
                      "parse_issue": False}
@@ -279,7 +282,7 @@ class Judge:
         out["unfaithful"] = faith["faithfulness"] < thr
         out["unfaithful_strict"] = faith["faithfulness_strict"] < thr
         out["abstained"] = label == "abstained"
-        out["wrong_behavior"] = label in HALLUCINATION_LABELS
+        out["wrong_behavior"] = label in (HALLUCINATION_LABELS | {"answered_core"} if conflict else HALLUCINATION_LABELS)
         out["hallucinated"] = bool(out["unfaithful"] or out["wrong_behavior"])
         out["hallucinated_strict"] = bool(out["unfaithful_strict"] or out["wrong_behavior"])
         if self.ev["also_source_faithfulness"]:

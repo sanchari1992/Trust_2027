@@ -14,11 +14,14 @@ CONDITIONS = ["baseline", "m1", "m2", "m3", "m123"]
 # CONTROLS are not mutations. They show how much of an increase in hallucinations is NOT caused by the
 # mutations: c_rerun = the unchanged benchmark question answered a second time (the RAG and the LLM are not
 # deterministic), c_pad = the benchmark question + content-free filler as long as the M1 version (length alone).
-CONTROL_CONDITIONS = ["c_rerun", "c_pad"]
+CONTROL_CONDITIONS = ["c_rerun", "c_rerun2", "c_rerun3", "c_pad"]
 # DERIVED conditions are computed in the analysis from other conditions, never run on a RAG.
 # m_union = "Benchmark + M1/M2/M3 combined from the separate runs": a question counts as failing if it fails in the
 # unchanged benchmark OR in any of the three single-mutation runs (no extra evaluation, see README section 14.6).
-DERIVED_CONDITIONS = ["m_union"]
+# c_union = the matched noise control of m_union: the unchanged question answered four times (baseline, c_rerun, c_rerun2,
+# c_rerun3), failing if it fails in ANY of them. m_union has four chances to fail, so it must be compared with c_union,
+# not with a single run.
+DERIVED_CONDITIONS = ["m_union", "c_union"]
 ALL_CONDITIONS = CONDITIONS + DERIVED_CONDITIONS + CONTROL_CONDITIONS
 
 
@@ -40,6 +43,9 @@ CONDITION_LABELS = {
     "m123": "Benchmark + M1+M2+M3 in one prompt",
     "m_union": "Benchmark + M1/M2/M3 combined (any separate run)",
     "c_rerun": "Control: same question again",
+    "c_rerun2": "Control: same question, third time",
+    "c_rerun3": "Control: same question, fourth time",
+    "c_union": "Control: same question 4 times (any run fails)",
     "c_pad": "Control: off-topic filler",
 }
 

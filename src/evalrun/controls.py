@@ -9,7 +9,10 @@ every extra attempt is another chance to hallucinate. Two controls make that vis
   c_pad    the original question + content-free filler sentences, as many words as the M1 version added.
            If M1 finds more hallucinations than c_pad, the cause is the content M1 added, not length alone.
 
-Both keep the reference answer, so they are judged exactly like the baseline.
+c_rerun2, c_rerun3  two more repeats, so that the derived c_union (fails in any of 4 runs) is the matched noise
+           control of m_union (fails in baseline or any of 3 mutations).
+
+All keep the reference answer, so they are judged exactly like the baseline.
 """
 from src.benchgen.common import make_rng
 
@@ -53,8 +56,8 @@ def pad_row(base_row, m1_row, seed):
 def control_rows(cond, rows, seed):
     """rows: {cond: {id: row}} of the conditions already loaded. Returns {id: row} for a control."""
     base = rows["baseline"]
-    if cond == "c_rerun":
-        return {i: {**r, "mutation": "c_rerun", "operators": ["c_rerun"]} for i, r in base.items()}
+    if cond in ("c_rerun", "c_rerun2", "c_rerun3"):
+        return {i: {**r, "mutation": cond, "operators": [cond]} for i, r in base.items()}
     if cond == "c_pad":
         m1 = rows.get("m1") or {}
         out = {}

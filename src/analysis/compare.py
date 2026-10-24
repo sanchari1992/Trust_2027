@@ -16,7 +16,7 @@ from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.preprocessing import StandardScaler
 
-from src.analysis.features import ALL_NUMERIC_FEATURES
+from src.analysis.features import ALL_NUMERIC_FEATURES, REALISM_FEATURES
 
 
 def bootstrap_mean_diff(a, b, n_samples, rng):
@@ -75,9 +75,10 @@ def _benjamini_hochberg(pvals):
     return out
 
 
-def classifier_test(df_a, df_b, test_size, cv_folds, seed):
-    """Can a simple classifier tell set A from set B, using only these features?"""
-    X = pd.concat([df_a[ALL_NUMERIC_FEATURES], df_b[ALL_NUMERIC_FEATURES]], ignore_index=True)
+def classifier_test(df_a, df_b, test_size, cv_folds, seed, features=None):
+    """Can a simple classifier tell set A from set B? Default features: every feature except pure length (REALISM_FEATURES)."""
+    features = list(features or REALISM_FEATURES)
+    X = pd.concat([df_a[features], df_b[features]], ignore_index=True)
     X = X.fillna(X.median(numeric_only=True))
     y = np.array([1] * len(df_a) + [0] * len(df_b))
 
@@ -95,7 +96,7 @@ def classifier_test(df_a, df_b, test_size, cv_folds, seed):
 
     clf = LogisticRegression(max_iter=2000).fit(X_train_s, y_train)
     held_out_auc = roc_auc_score(y_test, clf.predict_proba(X_test_s)[:, 1])
-    importance = dict(zip(ALL_NUMERIC_FEATURES, clf.coef_[0]))
+    importance = dict(zip(features, clf.coef_[0]))
     top = sorted(importance.items(), key=lambda kv: -abs(kv[1]))[:8]
     return {
         "held_out_auc": float(held_out_auc),

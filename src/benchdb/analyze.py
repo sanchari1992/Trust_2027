@@ -25,6 +25,7 @@ import hashlib
 import re
 
 from src.analysis.graph_features import graph_features, question_graph_from_doc
+from src.analysis.complexity_features import extract as complexity_extract
 from src.analysis.lexical_features import extract as lexical_extract
 
 WH = {"what", "which", "who", "whom", "whose", "when", "where", "why", "how"}
@@ -217,7 +218,8 @@ class Analyzer:
                 span = next((e for e in doc.ents if e.start <= n < e.end), None)
                 slots.append({"slot": f"ENT_{len(slots)}", "type": cg.nodes[n]["ent"],
                               "text": span.text if span is not None else cg.nodes[n]["lemma"]})
-        feats = {**{k: v for k, v in stats.items() if k != "wh_word"}, **lexical_extract(text)}
+        feats = {**{k: v for k, v in stats.items() if k != "wh_word"}, **lexical_extract(text),
+                 **complexity_extract(text, doc)}
         return {
             "role": role, "text": text, "entities": ents, "graph": graph_to_json(g),
             "template": pattern, "template_id": template_id(pattern),

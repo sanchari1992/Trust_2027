@@ -1700,6 +1700,9 @@ Order of the steps: `corpora, indexes, real, generate, union, db, stats, mutate,
 
 ## 34. The mutation web page and API (`scripts/serve_mutator.py`)
 
+> Full guide, including the new graph view: `docs/WEBPAGE.md`.
+
+
 A small web page where anyone types a question and its expected answer, ticks the mutations, and gets back the
 mutated prompt and the **new expected answer** (plus the expected behaviour: answer / reject the premise / say it
 cannot be answered). It runs the same code as the paper pipeline (`src/benchdb/generate.py`), for one prompt at a time.
@@ -1743,3 +1746,26 @@ The reply holds `results` (one per mutation: `prompt`, `expected_answer`, `expec
 **Safety.** Every request spends your DeepSeek key. The server listens on this computer only. To share it on a
 network start it with `--host 0.0.0.0 --token SECRET` (a token is then required, and typed into the page under "More
 options"). For a public website, put it behind a login and a rate limit first; this server has neither.
+
+
+## 35. Deviation tables, complexity measures and the three-condition design (update-36/37)
+
+**Design.** The paper compares the unchanged benchmark with two mutations: M2 Colloquial and M3 Premise (including patient profiles). M1 Elaborate is switched off (`mutation.enabled: [m2, m3]`; add `m1` to bring it back, the code is unchanged) because making a prompt longer is not a way of making it more realistic. `evaluation.conditions` is `[baseline, m2, m3]`. The re-ask and padding controls (`c_rerun`, `c_pad`) are no longer run: each mutation is compared with the benchmark on the same questions (paired tests, McNemar with Benjamini-Hochberg correction, README 14), which already accounts for answer-to-answer noise. The derived union views (`m_union`) only exist when all of baseline, m1, m2 and m3 were run. Extra noise from realistic wording or added context is part of the result, not something to remove.
+
+**Realism is measured without length.** Pure size measures (`LENGTH_FEATURES` in `src/analysis/features.py`: characters, words, tokens, sentences, graph nodes/edges) are not used by the classifier or the deviation tables; mean words is printed for information only. Sentence-complexity measures were added (`src/analysis/complexity_features.py`, no extra packages): dependency-tree depth, mean dependency distance (Liu 2008), clause count, Flesch-Kincaid grade (1975), Flesch Reading Ease (1948), Gunning Fog (1952), syllables per word, long-word ratio. The content-word graph depth (`max_depth`) was already there.
+
+**Deviation report** (`python scripts/deviation_report.py --profile pilot|paper [--real-file held_out.jsonl]`, no LLM calls) writes `deviation_report.md`, `deviation_*.csv`, `deviation_tables.tex`:
+A. every feature, real vs generated: means, Cohen's d (generated minus real, bootstrap interval), single-feature AUC, largest first, in three families (register -> M2, user voice -> M3, complexity);
+B. the same features after each mutation, closure = 1 - |d after| / |d before| (negative = moved away);
+C. mean |d| and closure per family; D. d per generator;
+E. per condition: mean |d| over all features, how many features are closer to real prompts than in the unchanged benchmark, classifier AUC (non-length features).
+For the paper give `--real-file` a held-out real sample that was not used to design the mutations, otherwise the closure numbers are circular.
+
+**Rebuild after upgrading:** the entity databases store the features, so delete `results\*_pilot` (and, for the paper profile, `results\benchdb_paper`) before the next run so the new complexity features are computed.
+
+
+## 36. Web page graph view and the patient-conflict scoring (update-38)
+
+* **Graph view** in the web page and API (`POST /api/graph`; every `/api/mutate` result carries `graph_before`, `graph`, `graph_summary`). Full description, the reason for it and its limits: **`docs/WEBPAGE.md`**. Code: `src/service/graphs.py`.
+* **Patient-conflict scoring (fix).** For a `patient_conflict` prompt the right behaviour is to say that the question cannot be answered or that the answer may not apply to this patient. Giving the standard answer as if the profile did not matter (`answered_core`) now counts as a failure and as wrong behaviour (before, it counted as correct). Results produced with earlier versions must be re-evaluated.
+* **Patient profiles only go on questions.** ARES writes declarative statements; a profile in front of a statement made the system refuse because there was no question. Patient operators are skipped for non-questions (`is_question` in `src/mutate/userinfo.py`); those items get another Premise operator. The conflict prompt now asks for a medical situation, not an occupation.

@@ -65,7 +65,7 @@ def mutate_item(item, ctx, cfg, needed=None):
     one version of each mutation unless even the fallbacks fail. Fallbacks are marked in the row's meta."""
     mc, seed = cfg["mutation"], cfg["mutation"]["seed"]
     fill = mc.get("fill_all", True)
-    need = set(needed or ("m1", "m2", "m3"))
+    need = set(needed or ("m1", "m2", "m3")) & set(mc.get("enabled", ("m1", "m2", "m3")))
     rng = lambda tag: make_rng(seed, item["id"], tag)  # noqa: E731
     base = Prompt(core=item["question"])
     rows, rejected = {}, {}
@@ -186,7 +186,7 @@ def run(rag, method, cfg, limit=None, fresh=False, dry_run=False):
     todo = [it for it in items if it["id"] not in done]
     # Items processed earlier whose mutation was dropped (it failed its checks, or the settings had no fallback yet):
     # with mutation.fill_all they are tried again, and ONLY the missing mutations are produced (no repeated work).
-    have = {c: {r["id"] for r in read_jsonl(mutation_file(cfg, c, rag, method))} for c in ("m1", "m2", "m3")}
+    have = {c: {r["id"] for r in read_jsonl(mutation_file(cfg, c, rag, method))} for c in cfg["mutation"].get("enabled", ("m1", "m2", "m3"))}
     missing = {}
     if mc.get("fill_all", True):
         for it in items:

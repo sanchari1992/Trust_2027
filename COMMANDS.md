@@ -53,7 +53,7 @@ python scripts/prepare_real_queries.py medical
 python scripts/run_all.py --profile paper --rags medrag --dry-run
 
 # 2. a small pilot first, profile `pilot` (its own folders results/*_pilot: it never mixes with earlier runs or the paper run)
-python scripts/run_all.py --profile pilot --rags medrag --n 100 --limit 50 --steps real,generate,union,db,mutate,evaluate,analyze,report,examples
+python scripts/run_all.py --profile pilot --rags medrag --n 100 --limit 50 --steps real,generate,union,db,mutate,evaluate,analyze,audit,report,examples
 
 # 3. the paper run, step by step (every step resumes if interrupted)
 python scripts/run_all.py --profile paper --rags medrag --steps generate          # 10,000 per method (RAGAS, ARES, DataMorgana)
@@ -84,3 +84,11 @@ Mutation web page / API (README 34): `python scripts/serve_mutator.py` then open
 Patient profiles (README 13.13): the `paper` and `pilot` profiles now include the `patient_consistent` / `patient_conflict` Premise operators. Mutate with `--fresh` after upgrading. Generate only these from a database: `python scripts/gen_bench.py --db my.benchmark --mutation patient_conflict`. In the web page: "Premise adds ... a patient profile".
 
 Two LLMs (README 14.12): DeepSeek generates (`llm:`), GPT-6 Luna judges (`evaluation.judge_llm`). Put both keys in `.env`: `DEEPSEEK_API_KEY=...` and `OPENAI_API_KEY=...`. Check the judge against a reference first: `python scripts/judge_agreement.py --profile pilot --rag medrag --n 200` (run the evaluate step with `evaluation.store_contexts: true` before). Changing the judge redoes the stored evaluation results. `judge_llm: null` = judge with DeepSeek as before.
+
+Update-37 (README 35): M1 and the re-ask/padding controls are off; conditions are baseline, m2, m3. New complexity features; length is no longer a realism measure. Deviation tables: `python scripts/deviation_report.py --profile pilot` (add `--real-file <held-out>` for the paper). Rerun the pilot: delete `results\*_pilot`, then `bash run_paper.sh --pilot --n 20`.
+
+Update-38 (README 36, docs/WEBPAGE.md): the web page shows the prompt graph and what each mutation changes. Patient-conflict scoring fixed; patient profiles only on questions. Delete `results\\*_pilot` before re-running.
+
+Update-39: `python scripts/prepare_real_queries.py medical` now also writes data/real_queries/medical_heldout.jsonl (300 queries, removed from medical.jsonl). run_paper.sh runs it for you; then use `--heldout data/real_queries/medical_heldout.jsonl`.
+
+Update-39b: `prepare_real_queries.py medical` no longer downloads when data/real_queries/medical.jsonl exists: it only makes medical_heldout.jsonl from it (same seed). `--refresh` forces a new download (the HealthChat file name is tried under its new name too).

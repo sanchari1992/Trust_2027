@@ -59,6 +59,7 @@ class MutationService:
         self._chat = chat  # tests can pass a fake chat(system, user, max_tokens=None, temperature=None)
         self._ctx = None
         self._lock = threading.Lock()
+        self._graphs = None
 
     # ------------------------------------------------------------------ catalog (for the page)
     def catalog(self):
@@ -158,8 +159,40 @@ class MutationService:
         for m in order:
             results.append(self._present(m, rows[m], answer))
         failed = {m: skipped[m] for m in skipped if m not in rows}
+        graph_before = self._add_graphs(question, results, notes)
         return {"question": question, "expected_answer": answer, "grounding": grounding, "seed": seed,
-                "results": results, "not_generated": failed, "notes": notes}
+                "graph_before": graph_before, "results": results, "not_generated": failed, "notes": notes}
+
+    # ------------------------------------------------------------------ graphs
+    def graph_service(self):
+        if self._graphs is None:
+            from src.service.graphs import GraphService
+            self._graphs = GraphService(self.cfg)
+        return self._graphs
+
+    def graph(self, text):
+        """The graph of one prompt (for the live preview on the page)."""
+        text = (text or "").strip()
+        if not text:
+            raise RequestError("Please enter a question.")
+        if len(text) > MAX_QUESTION_CHARS:
+            raise RequestError("The text is too long (up to 2,000 characters).")
+        return self.graph_service().graph(text)
+
+    def _add_graphs(self, question, results, notes):
+        """Adds `graph` and `graph_summary` to every result (graph of the mutated prompt with added nodes marked, and a
+        sentence about the change). Returns the original prompt's graph. A missing spaCy model only costs the graphs."""
+        try:
+            gs = self.graph_service()
+            before = None
+            for r in results:
+                b, a, text = gs.compare(question, r["prompt"])
+                r["graph"], r["graph_before"], r["graph_summary"] = a, b, text
+                before = before or b
+            return before or gs.graph(question)
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"The graph view is unavailable ({type(e).__name__}: {str(e)[:120]}).")
+            return None
 
     # ------------------------------------------------------------------ helpers
     def _real_lengths_available(self, mc):

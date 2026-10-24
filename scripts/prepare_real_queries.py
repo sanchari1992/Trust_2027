@@ -143,19 +143,60 @@ def prepare_general(cfg):
 
 
 # ---------------------------------------------------------------- medical
+SPLIT_ONLY = False
+REFRESH = False  # --refresh: download and sample again even if medical.jsonl exists
+
+
+def _download_annotations(hf_hub_download):
+    """The annotation file has been renamed on the Hub before, so try the known names and then look for the newest one."""
+    from huggingface_hub import HfApi
+
+    names = ["HealthChat-11K_master_annotations_v2.1.0.jsonl", "HealthChat-11K_v2.1.0_annotations.jsonl"]
+    try:
+        found = sorted(f for f in HfApi().list_repo_files(HEALTHCHAT_ANNOTATIONS_ID, repo_type="dataset")
+                       if "annotations" in f and f.endswith(".jsonl"))
+        names += found[::-1]
+    except Exception:  # noqa: BLE001
+        pass
+    last = None
+    for name in dict.fromkeys(names):
+        try:
+            return hf_hub_download(repo_id=HEALTHCHAT_ANNOTATIONS_ID, filename=name, repo_type="dataset")
+        except Exception as e:  # noqa: BLE001
+            last = e
+    raise SystemExit(f"Could not download the HealthChat annotations ({last}).\n"
+                     "If data/real_queries/medical.jsonl already exists, keep your sample and only split it:\n"
+                     "    python scripts/prepare_real_queries.py medical --split-only")
+
+
+def split_existing(cfg, rc):
+    """No download: split the existing medical.jsonl into medical_heldout.jsonl (held out) and medical.jsonl (rest), with the
+    configured seed. Your sample stays exactly the same set of queries. Running it twice does nothing the second time."""
+    out = ROOT / cfg["real_queries"]["output_dir"]
+    path, hold = out / "medical.jsonl", out / "medical_heldout.jsonl"
+    if hold.exists():
+        print(f"{hold} already exists: nothing to do. (Delete it, and put all queries back in medical.jsonl, to split again.)")
+        return
+    rows = [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
+    random.Random(rc["seed"]).shuffle(rows)
+    n_hold = min(int(rc.get("heldout", 300)), len(rows) // 3)
+    _write(rows[:n_hold], hold)
+    _write(rows[n_hold:], path)
+
 def prepare_medical(cfg):
+    out = ROOT / cfg["real_queries"]["output_dir"]
+    if SPLIT_ONLY or ((out / "medical.jsonl").exists() and not REFRESH):
+        # An existing sample is kept (no download), so your queries stay the same set; only the held-out split is made if missing.
+        return split_existing(cfg, cfg["real_queries"]["medical"])
     from datasets import load_dataset
     from huggingface_hub import hf_hub_download
 
-    _check_login()
     rc = cfg["real_queries"]["medical"]
     rng = random.Random(rc["seed"])
+    _check_login()
 
     print(f"Downloading HealthChat-11K annotations from {HEALTHCHAT_ANNOTATIONS_ID}...")
-    ann_path = hf_hub_download(
-        repo_id=HEALTHCHAT_ANNOTATIONS_ID, filename="HealthChat-11K_v2.1.0_annotations.jsonl",
-        repo_type="dataset",
-    )
+    ann_path = _download_annotations(hf_hub_download)
     annotations = [json.loads(l) for l in open(ann_path, encoding="utf-8") if l.strip()]
     print(f"{len(annotations):,} annotated conversations")
     by_id = {}
@@ -203,13 +244,21 @@ def prepare_medical(cfg):
         print(f"{source}: matched {found} of {len(by_id.get(source, {}))} annotated conversations")
 
     rng.shuffle(rows)
-    _write(rows, ROOT / cfg["real_queries"]["output_dir"] / "medical.jsonl")
+    out = ROOT / cfg["real_queries"]["output_dir"]
+    n_hold = min(int(rc.get("heldout", 300)), len(rows) // 3)
+    # A held-out part that the mutations and the realism tables never use for design, for the paper's final closeness numbers
+    # (README 35). Same seed = same split every time. medical.jsonl keeps the rest.
+    _write(rows[:n_hold], out / "medical_heldout.jsonl")
+    _write(rows[n_hold:], out / "medical.jsonl")
 
 
 STEPS = {"general": prepare_general, "medical": prepare_medical}
 
 
 def main():
+    global SPLIT_ONLY, REFRESH
+    SPLIT_ONLY, REFRESH = "--split-only" in sys.argv, "--refresh" in sys.argv
+    sys.argv = [a for a in sys.argv if a not in ("--split-only", "--refresh")]
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     if which != "all" and which not in STEPS:
         sys.exit(f"Usage: python scripts/prepare_real_queries.py [{'|'.join(STEPS)}|all]")

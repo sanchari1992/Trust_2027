@@ -47,8 +47,11 @@ if [ "$PILOT" = 1 ]; then
   PN="${N:-100}"; PL=$(( PN < 50 ? PN : 50 ))      # pilot size: --n N (default 100); mutate/evaluate at most 50 per file
   step "PILOT (profile pilot: own folders, $PN questions per method, $PL per file)"
   python scripts/run_all.py --profile pilot --rags "$RAGS" --n "$PN" --limit "$PL" \
-      --steps real,generate,union,db,mutate,evaluate,analyze,report,examples
-  echo "Pilot done. Read results/paper_pilot/paper_report.md and results/eval_pilot/_report/summary_counts.md, then run without --pilot."
+      --steps real,generate,union,db,mutate,evaluate,analyze,audit,report,examples
+  step "PILOT: are the mutated questions closer to the real ones? (feature tables, no LLM calls)"
+  BP_PROFILE=pilot python scripts/compare_mutations.py
+  BP_PROFILE=pilot python scripts/deviation_report.py --profile pilot
+  echo "Pilot done. Read results/paper_pilot/paper_report.md, results/eval_pilot/_report/summary_counts.md and results/analysis_pilot/mutation_realism.md, then run without --pilot."
   exit 0
 fi
 
@@ -93,6 +96,7 @@ python scripts/plot_transitions.py
 if [ -n "$HELDOUT" ]; then
   step "8. realism against held-out real queries"
   python scripts/compare_mutations.py --real-file "$HELDOUT" --real-domain "$REAL_DOMAIN"
+  python scripts/deviation_report.py --profile paper --real-file "$HELDOUT"
 fi
 
 step "9. paper report and example queries"

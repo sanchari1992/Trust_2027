@@ -36,9 +36,10 @@ from src.mutate.common import CONDITION_LABELS, CONDITIONS, condition_file
 from src.rags.registry import RAG_NAMES
 
 # The features that separated real queries from generated questions most consistently.
-KEY_FEATURES = ["n_sentences", "starts_with_verb", "starts_lowercase", "has_first_person",
-                "has_politeness_marker", "has_typo_like_repeat", "ends_with_question_mark",
-                "has_wh_word", "n_tokens", "n_entities", "n_components"]
+KEY_FEATURES = ["starts_with_verb", "starts_lowercase", "has_first_person", "has_politeness_marker",
+                "has_typo_like_repeat", "ends_with_question_mark", "has_wh_word", "n_entities",
+                "tree_depth", "mean_dep_distance", "n_clauses", "fk_grade", "flesch_ease", "gunning_fog",
+                "word_len"]  # word_len is shown for information only; it is not used to judge realism
 
 
 def main():

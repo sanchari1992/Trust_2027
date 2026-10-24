@@ -92,7 +92,7 @@ PROFILE_CONSISTENT_PROMPT = """Passage:
 Question: {question}
 Reference answer: {answer}
 
-Write a short patient profile that a patient could state before asking this question: age and sex plus ONE relevant background fact (a condition, a medication or a history). It must be fully compatible with the passage and the reference answer: the reference answer must still be right for this patient, with no exception, contraindication or different advice in the passage. It must not state, hint at or contradict the answer. Write it in the first person, one or two short sentences, at most 30 words, for example: "I am a 54-year-old woman with type 2 diabetes."
+Write a short patient profile that a patient could state before asking this question: age and sex plus ONE relevant background fact (a condition, a medication or a history). It must be fully compatible with the passage and the reference answer: the reference answer must still be right for this patient, with no exception, contraindication or different advice in the passage. It must not state, hint at or contradict the answer. Write it in the first person, ONE short sentence, at most 20 words, for example: "I am a 54-year-old woman with type 2 diabetes."
 Reply with JSON only: {{"profile": "..."}}"""
 
 PROFILE_CONFLICT_PROMPT = """Passage:
@@ -101,7 +101,7 @@ PROFILE_CONFLICT_PROMPT = """Passage:
 Question: {question}
 Reference answer: {answer}
 
-Write a short patient profile that a patient could state before asking this question, that CONFLICTS with the question or the passage, so that the passage does not tell what is right for THIS patient. For example: a different age group than the passage covers (a child, an older adult), pregnancy, a contraindication or allergy, another organ system, or the opposite sex for a sex-specific condition. The passage must not say what to do for this kind of patient. Write it in the first person, one or two short sentences, at most 30 words. Also say in "conflict" (one short sentence) why the reference answer does not apply.
+Write a short patient profile (a person with a medical situation: age group, pregnancy, an allergy or contraindication, an organ that is absent or removed, a prior surgery or treatment; NOT an occupation, hobby or research interest) that a patient could state before asking this question, that CONFLICTS with the question or the passage, so that the passage does not tell what is right for THIS patient. For example: a different age group than the passage covers (a child, an older adult), pregnancy, a contraindication or allergy, another organ system, or the opposite sex for a sex-specific condition. The passage must not say what to do for this kind of patient. Write it in the first person, ONE short sentence, at most 20 words. Also say in "conflict" (one short sentence) why the reference answer does not apply.
 Reply with JSON only: {{"profile": "...", "conflict": "..."}}"""
 
 PREMISE_LEADS = [
@@ -256,11 +256,26 @@ def _make(op, ctx, item, rng):
     raise ValueError(op)
 
 
+_WH = ("what", "which", "who", "whom", "whose", "when", "where", "why", "how", "is", "are", "was", "were", "do", "does", "did",
+       "can", "could", "should", "would", "will", "may", "might", "has", "have", "had",
+       "explain", "describe", "list", "name", "state", "define", "tell", "give", "identify", "compare", "summarize")
+
+
+def is_question(text):
+    """True for an interrogative sentence (ends with ? or starts with a question word)."""
+    t = (text or "").strip()
+    return t.endswith("?") or (t.split()[:1] or [""])[0].lower().strip(",") in _WH
+
+
 def mutate_userinfo(item, ctx, mc, rng):
     """Returns {"ok": True, "kind", "operator", "pre", "post", "answer", "behavior",
     "answer_changed", "claim", "info"} or {"ok": False, "reason"}."""
     kind = "correct" if rng.random() < mc["p_correct"] else "incorrect"
     pool = mc["correct_operators"] if kind == "correct" else mc["incorrect_operators"]
+    if not is_question(item["question"]):
+        # A patient profile in front of a declarative statement (ARES writes statements, not questions) reads as nonsense
+        # and the system refuses because there is no question, not because of the profile: those operators are skipped.
+        pool = {k: v for k, v in pool.items() if k not in PROFILE_OPS} or pool
     last = "no_attempt"
     for attempt in range(ctx.max_retries + 1):
         chosen = weighted_sample(rng, pool, 1)

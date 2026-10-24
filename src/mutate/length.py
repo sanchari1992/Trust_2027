@@ -140,11 +140,18 @@ def _target_words(item, ctx, tc, rng):
         return max(rng.randint(int(lo), int(hi)), n0 + 1)
     if mode == "real":
         domain = "medical" if item.get("rag") == "medrag" else "general"
-        pool = [n for n in ctx.real_lengths(domain) if n0 + 4 <= n <= tc.get("cap_words", 100)]
-        if not pool:
-            if not ctx.real_lengths(domain):
-                _warn_once(ctx, domain)
+        lengths = sorted(ctx.real_lengths(domain))
+        if not lengths:
+            _warn_once(ctx, domain)
             return None
+        # Never go beyond what real users write: cap at a percentile of the real lengths (default 90th), then draw
+        # from the real lengths that are at least `min_gain` words longer than the question.
+        pct = tc.get("cap_percentile", 90)
+        cap = min(tc.get("cap_words", 100), lengths[min(len(lengths) - 1, int(len(lengths) * pct / 100))])
+        pool = [n for n in lengths if n0 + tc.get("min_gain", 3) <= n <= cap]
+        if not pool:
+            # the question is already as long as real ones: add only one short, content-free instruction
+            return n0 + tc.get("min_gain", 3)
         return rng.choice(pool)
     return None
 

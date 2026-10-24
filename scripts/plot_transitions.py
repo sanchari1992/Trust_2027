@@ -41,7 +41,7 @@ OUTCOMES = {"hallucinated": "Hallucinated", "wrong_behavior": "Wrong behaviour",
 SLUG = {"hallucinated": "hallucinated", "wrong_behavior": "wrong_behavior", "failed": "not_correct"}
 MUT = ["m1", "m2", "m3"]
 NAME = {"m1": "M1 length", "m2": "M2 linguistic", "m3": "M3 user info",
-        "c_rerun": "Control: same question again", "c_pad": "Control: off-topic filler"}
+        "c_rerun": "Control: same question again", "c_rerun2": "Control: same question, 3rd time", "c_rerun3": "Control: same question, 4th time", "c_pad": "Control: off-topic filler"}
 BAD, GOOD, NEUTRAL = "#D55E00", "#009E73", "#6B7280"  # colour-blind safe: vermillion / bluish green / grey
 
 
@@ -53,7 +53,7 @@ def stats(w):
     """Per condition: newly failing, fixed, failing in both, fine in both, plus the overlap with the other mutations."""
     rows = []
     mut = [c for c in MUT if c in w]
-    for c in [c for c in MUT + ["c_rerun", "c_pad"] if c in w]:
+    for c in [c for c in MUT + ["c_rerun", "c_rerun2", "c_rerun3", "c_pad"] if c in w]:
         s = w[["baseline", c]].dropna()
         b, x = s["baseline"].to_numpy(), s[c].to_numpy()
         new = (b == 0) & (x == 1)
@@ -173,7 +173,7 @@ def main():
     a = ap.parse_args()
     cfg = load_config()
     df = load_results(cfg)
-    df = df[~df["condition"].astype(str).isin(["m_union", "m123"])]
+    df = df[~df["condition"].astype(str).isin(["m_union", "c_union", "m123"])]
     out = ROOT / cfg["evaluation"]["output_dir"] / "_report"
     out.mkdir(parents=True, exist_ok=True)
     md = ["# Which mutation exposes failures, which fixes some, which is consistent?", "",

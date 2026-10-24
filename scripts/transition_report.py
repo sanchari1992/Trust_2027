@@ -34,7 +34,7 @@ from src.mutate.common import CONDITION_LABELS
 
 KEYS = ["rag", "method", "id"]
 OUTCOMES = {"failed": "not_correct", "hallucinated": "hallucinated", "wrong_behavior": "wrong_behavior"}
-MUTS = ["m1", "m2", "m3", "c_rerun", "c_pad"]
+MUTS = ["m1", "m2", "m3", "c_rerun", "c_rerun2", "c_rerun3", "c_pad"]
 GROUPS = ["m1", "m2", "m3"]
 
 
@@ -110,7 +110,7 @@ def question_level(df):
 def main():
     cfg = load_config()
     df = load_results(cfg)
-    df = df[~df["condition"].astype(str).isin(["m_union", "m123"])]
+    df = df[~df["condition"].astype(str).isin(["m_union", "c_union", "m123"])]
     out = ROOT / cfg["evaluation"]["output_dir"] / "_report"
     out.mkdir(parents=True, exist_ok=True)
     pooled, per = transitions(df, []), transitions(df, ["rag", "method"])

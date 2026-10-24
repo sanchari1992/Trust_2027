@@ -139,6 +139,7 @@ real_queries:
     min_words: 3
     max_words: 200
     seed: 42
+    heldout: 300            # this many queries go to medical_heldout.jsonl (not used in medical.jsonl): the held-out sample for the paper's closeness numbers (README 35)
 
 # ------------------------------------------------------------------------
 # Comparing question sets (real queries vs. generated benchmarks).
@@ -156,6 +157,7 @@ analysis:
 # ------------------------------------------------------------------------
 mutation:
   output_dir: results/mutations   # holds mutation1_length/, mutation2_linguistic/, mutation3_userinfo/, mutation123_combined/
+  enabled: [m2, m3]               # which mutations are produced. M1 (Elaborate, lengthens the prompt) is OFF for the paper: length is not a measure of realism. Add m1 to switch it back on (code unchanged).
   seed: 42
   temperature: 0.3                # LLM randomness when WRITING mutation text (checks always use 0)
   concurrency: 8                  # items processed in parallel
@@ -177,6 +179,8 @@ mutation:
       mode: real                  # none = every question gets n_ops operators (long prompts) | real = each question draws a target length from the word counts of REAL user queries of its domain, and operators are added one at a time until it is reached | range = uniform in `range`
       range: [25, 80]             # used by mode range
       cap_words: 100              # mode real: ignore real queries longer than this
+      cap_percentile: 90          # mode real: also never exceed this percentile of the real lengths (keeps prompts from being longer than real ones)
+      min_gain: 3                 # mode real: the prompt must grow by at least this many words
       max_ops: 3                  # at most this many operators per question
       slack: 1.4                  # an operator that would push the prompt past target x slack is skipped
 
@@ -227,7 +231,7 @@ mutation:
 # ------------------------------------------------------------------------
 evaluation:
   output_dir: results/eval
-  conditions: [baseline, m1, m2, m3, c_rerun, c_pad]   # baseline = original benchmark; m1/m2/m3 = the original question with ONLY that mutation; c_rerun, c_pad = CONTROLS (not mutations): the same benchmark question answered again, and the question + off-topic filler as long as the M1 version. Remove the controls to save about 30% of the cost.
+  conditions: [baseline, m2, m3]   # baseline = original benchmark; m1/m2/m3 = the original question with ONLY that mutation; c_rerun, c_pad = CONTROLS (not mutations): the same benchmark question answered again, and the question + off-topic filler as long as the M1 version. Remove the controls to save about 30% of the cost.
   combined: derived               # derived = the combined "M1+M2+M3" number is computed from the separate m1, m2, m3 runs (a question fails if it fails in the benchmark or in any of the three; nothing extra is run). run = also run m123, the three mutations applied to ONE prompt (needs mutation.generate_combined: true and costs a fifth of the evaluation)
   sample_per_file: 500            # questions per (rag, method) evaluated in EVERY condition; null = all. Same questions in all conditions.
   seed: 42                        # which questions are sampled
@@ -321,8 +325,8 @@ profiles:
     mutation:
       output_dir: results/mutations_paper
       userinfo:                      # patient-profile premises (README 13.13) are part of the medical paper
-        correct_operators: {patient_consistent: 1.0}
-        incorrect_operators: {patient_conflict: 1.0}
+        correct_operators: {patient_consistent: 3.0}   # raised from 1.0: only 4 of 60 M3 prompts were patient prompts in the pilot (README 36)
+        incorrect_operators: {patient_conflict: 3.0}
       concurrency: 16
     evaluation:
       output_dir: results/eval_paper
@@ -342,11 +346,12 @@ profiles:
     mutation:
       output_dir: results/mutations_pilot
       userinfo:                      # patient-profile premises (README 13.13) are part of the medical paper
-        correct_operators: {patient_consistent: 1.0}
-        incorrect_operators: {patient_conflict: 1.0}
+        correct_operators: {patient_consistent: 3.0}   # raised from 1.0: only 4 of 60 M3 prompts were patient prompts in the pilot (README 36)
+        incorrect_operators: {patient_conflict: 3.0}
     evaluation:
       output_dir: results/eval_pilot
       sample_per_file: null
+      store_contexts: true            # the pilot keeps the retrieved passages, so the judge can be re-checked (scripts/judge_agreement.py)
     analysis:
       output_dir: results/analysis_pilot
     benchdb:

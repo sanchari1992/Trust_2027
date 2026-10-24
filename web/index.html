@@ -36,6 +36,19 @@
   .box { white-space:pre-wrap; border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--bg); }
   .beh { color:var(--muted); font-size:.9rem; } .beh b.changed { color:var(--bad); } .beh b.same { color:var(--ok); }
   .meta { color:var(--muted); font-size:.8125rem; margin-top:8px; }
+  .graphs { display:grid; grid-template-columns:1fr 1fr; gap:12px; } @media (max-width:700px) { .graphs { grid-template-columns:1fr; } }
+  .gbox { border:1px solid var(--line); border-radius:8px; padding:8px; background:var(--bg); overflow-x:auto; }
+  .gbox .t { font-size:.8125rem; color:var(--muted); margin-bottom:4px; }
+  .gbox svg { display:block; max-width:100%; height:auto; margin:0 auto; }
+  .gn rect { fill:var(--card); stroke:var(--line); stroke-width:1.2; } .gn text { fill:var(--ink); font-size:12px; }
+  .gn.ent rect { stroke:var(--accent); stroke-width:2; }
+  .gn.added rect { fill:#d7f3e3; stroke:var(--ok); stroke-width:2; } .gn.added text { fill:#0a3d22; }
+  .gn.removed rect { fill:#fde3e0; stroke:var(--bad); stroke-width:2; stroke-dasharray:4 3; } .gn.removed text { fill:#5c130d; }
+  .ge { stroke:var(--muted); stroke-width:1.2; fill:none; } .gl { fill:var(--muted); font-size:9.5px; }
+  .legend { font-size:.8125rem; color:var(--muted); display:flex; flex-wrap:wrap; gap:4px 14px; margin-top:6px; }
+  .legend i { display:inline-block; width:12px; height:12px; border-radius:3px; vertical-align:-2px; margin-right:4px; border:1.5px solid var(--line); }
+  table.st { border-collapse:collapse; font-size:.8125rem; margin-top:8px; } table.st td, table.st th { padding:2px 10px 2px 0; text-align:left; font-weight:400; color:var(--muted); }
+  table.st td.v { color:var(--ink); }
 </style>
 </head>
 <body>
@@ -46,6 +59,7 @@
   <form id="form" class="card">
     <label class="f" for="q">Question / prompt</label>
     <textarea id="q" required placeholder="e.g. What nerve supplies the diaphragm?"></textarea>
+    <div id="live" class="hint" style="margin-top:6px"></div>
 
     <label class="f" for="a">Expected answer <span class="hint">(needed for Premise)</span></label>
     <textarea id="a" placeholder="e.g. The phrenic nerve."></textarea>
@@ -109,6 +123,47 @@ async function init() {
     <div class="ops">${m.operators.map(o => `<label><input type="checkbox" data-m="${m.id}" value="${o}"> ${o.replace(/_/g," ")}</label>`).join("")}</div>`).join("");
 }
 
+/* ---- prompt graph (README 34): one node per content word / named entity, one edge per dependency relation ---- */
+function drawGraph(g, label) {
+  if (!g || !g.nodes.length) return `<div class="gbox"><div class="t">${esc(label)}</div><div class="hint">No content words found.</div></div>`;
+  const lv = {}; g.nodes.forEach(n => (lv[n.depth] = lv[n.depth] || []).push(n));
+  const w = n => Math.max(46, 7.2 * n.label.length + 16), H = 26, GAP = 14, VG = 58;
+  const rows = Object.keys(lv).map(Number).sort((a, b) => a - b);
+  const total = r => lv[r].reduce((t, n) => t + w(n) + GAP, -GAP);
+  const W = Math.max(...rows.map(total)) + 20, pos = {};
+  rows.forEach(r => { let x = (W - total(r)) / 2; lv[r].sort((a, b) => a.id - b.id).forEach(n => { pos[n.id] = { x: x + w(n) / 2, y: 20 + r * VG + H / 2, w: w(n) }; x += w(n) + GAP; }); });
+  const Hh = 20 + (rows[rows.length - 1] + 1) * VG;
+  const edges = g.edges.filter(e => pos[e.source] && pos[e.target]).map(e => {
+    const a = pos[e.source], b = pos[e.target], mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    return `<path class="ge" d="M${a.x},${a.y + H / 2} C${a.x},${my} ${b.x},${my} ${b.x},${b.y - H / 2}"/><text class="gl" x="${mx}" y="${my}" text-anchor="middle">${esc(e.dep)}</text>`;
+  }).join("");
+  const nodes = g.nodes.map(n => { const p = pos[n.id];
+    return `<g class="gn ${n.status} ${n.entity ? "ent" : ""}"><title>${esc(n.pos)}${n.entity ? " · " + esc(n.entity) : ""}</title>
+      <rect x="${p.x - p.w / 2}" y="${p.y - H / 2}" width="${p.w}" height="${H}" rx="6"/><text x="${p.x}" y="${p.y + 4}" text-anchor="middle">${esc(n.label)}</text></g>`; }).join("");
+  return `<div class="gbox"><div class="t">${esc(label)}</div><svg viewBox="0 0 ${W} ${Hh}" width="${Math.round(W)}" role="img" aria-label="${esc(label)}">${edges}${nodes}</svg></div>`;
+}
+const LEGEND = `<div class="legend"><span><i style="background:var(--card)"></i>content word</span><span><i style="border-color:var(--accent)"></i>named entity</span>
+  <span><i style="background:#d7f3e3;border-color:var(--ok)"></i>new in the mutated prompt</span><span><i style="background:#fde3e0;border-color:var(--bad);border-style:dashed"></i>changed or removed</span></div>`;
+const STAT_NAMES = { n_nodes: "nodes", n_edges: "edges", max_depth: "graph depth", n_components: "separate parts", n_entities: "entities",
+  tree_depth: "parse-tree depth", mean_dep_distance: "mean dependency distance", fk_grade: "Flesch-Kincaid grade", flesch_ease: "reading ease", gunning_fog: "Gunning Fog" };
+function statsTable(b, a) {
+  const rows = Object.keys(STAT_NAMES).filter(k => (k in b.stats) || (k in b.complexity)).map(k => {
+    const x = k in b.stats ? b.stats[k] : b.complexity[k], y = k in a.stats ? a.stats[k] : a.complexity[k];
+    return `<tr><th>${STAT_NAMES[k]}</th><td class="v">${x ?? "–"}</td><td>→</td><td class="v">${y ?? "–"}</td></tr>`; }).join("");
+  return `<table class="st"><tr><th></th><th>before</th><th></th><th>after</th></tr>${rows}</table>`;
+}
+let liveTimer = null;
+async function liveGraph() {
+  const t = $("q").value.trim(), box = $("live");
+  if (t.length < 4) { box.innerHTML = ""; return; }
+  try {
+    const res = await fetch("/api/graph", { method: "POST", headers: { "Content-Type": "application/json", "X-Token": $("tk").value }, body: JSON.stringify({ text: t }) });
+    const d = await res.json(); if (!res.ok) throw new Error(d.detail);
+    box.innerHTML = `<details open><summary>Graph of your prompt (${d.stats.n_nodes} nodes, depth ${d.stats.max_depth})</summary>${drawGraph(d, "Your prompt")}${LEGEND}</details>`;
+  } catch (e) { box.innerHTML = ""; }
+}
+$("q").addEventListener("input", () => { clearTimeout(liveTimer); liveTimer = setTimeout(liveGraph, 800); });
+
 function copyBtn(id) { return `<button type="button" class="small" data-copy="${id}">Copy</button>`; }
 
 document.addEventListener("click", e => {
@@ -127,6 +182,9 @@ function render(d) {
       ${r.patient_profile ? `<span class="tag">patient profile${r.profile_written_by_user ? " (yours)" : ""}</span>` : (r.premise_kind ? `<span class="tag">${esc(r.premise_kind)} premise</span>` : "")}</h2>
       <div class="block"><div class="t"><span>Mutated prompt</span>${copyBtn("p" + i)}</div><div class="box" id="p${i}">${esc(r.prompt)}</div></div>
       <div class="block"><div class="t"><span>New expected answer</span>${copyBtn("x" + i)}</div><div class="box" id="x${i}">${esc(ans)}</div></div>
+      ${r.graph ? `<details open class="block"><summary>Prompt graph: what changed</summary>
+        <div class="graphs">${drawGraph(r.graph_before, "Original prompt")}${drawGraph(r.graph, "Mutated prompt")}</div>${LEGEND}
+        <div class="meta"><b>${esc(r.graph_summary)}.</b></div>${statsTable(r.graph_before, r.graph)}</details>` : ""}
       <div class="beh"><b class="${same ? "same" : "changed"}">${same ? "Answer unchanged." : "Answer changed."}</b> ${esc(r.expected_behavior_text)}</div>
       ${r.profile_conflict ? `<div class="meta">Why the profile conflicts: ${esc(r.profile_conflict)}</div>` : ""}<div class="meta">Operators: ${r.operators.map(esc).join(", ") || "none"} · ${r.words.before} → ${r.words.after} words${r.checked_by_llm ? " · checked by an LLM" : ""}</div></div>`;
   });

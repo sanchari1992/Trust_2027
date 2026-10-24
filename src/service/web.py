@@ -39,6 +39,20 @@ def create_app(cfg, token=None, chat=None):
     def mutations():
         return {"mutations": service.catalog(), "needs_token": bool(token)}
 
+    class GraphRequest(BaseModel):
+        text: str = Field(..., description="A prompt; the answer is its content-word dependency graph (no LLM call).")
+
+    @app.post("/api/graph")
+    def graph(req: GraphRequest, x_token: Optional[str] = Header(None)):
+        if token and x_token != token:
+            raise HTTPException(401, "Wrong or missing token.")
+        try:
+            return service.graph(req.text)
+        except RequestError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:  # spaCy model missing
+            return JSONResponse({"detail": f"{type(e).__name__}: {e}"[:300]}, status_code=502)
+
     @app.post("/api/mutate")
     def mutate(req: MutateRequest, x_token: Optional[str] = Header(None)):
         if token and x_token != token:

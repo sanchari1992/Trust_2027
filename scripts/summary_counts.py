@@ -144,8 +144,10 @@ BPLUS_SETS = [  # (label, conditions in the set, number of added versions)
     ("Benchmark + M1", ["baseline", "m1"]),
     ("Benchmark + M2", ["baseline", "m2"]),
     ("Benchmark + M3", ["baseline", "m3"]),
+    ("Benchmark + M2 + M3", ["baseline", "m2", "m3"]),
     ("Benchmark + M1 + M2 + M3", ["baseline", "m1", "m2", "m3"]),
     ("Reference: Benchmark + same question again", ["baseline", "c_rerun"]),
+    ("Reference: Benchmark + same question 3 more times", ["baseline", "c_rerun", "c_rerun2", "c_rerun3"]),
     ("Reference: Benchmark + off-topic filler", ["baseline", "c_pad"]),
 ]
 
@@ -191,7 +193,7 @@ METRICS = {"failed": "not correct (wrong + declined)", "hallucinated": "hallucin
 
 def combined_table(df, by):
     """benchmark count + new failures of M1 + M2 + M3 = sum; union = without double counting."""
-    parts = ["m1", "m2", "m3"]
+    parts = [p for p in ["m1", "m2", "m3"] if p in set(df["condition"].astype(str))]  # only the mutations that were run
     rows = []
     for key, d in (df.groupby(by) if by else [((), df)]):
         key = key if isinstance(key, tuple) else (key,)
@@ -205,7 +207,7 @@ def combined_table(df, by):
             union = int(np.maximum(b, w[parts].max(axis=1).to_numpy()).sum())
             total = int(b.sum()) + sum(new.values())
             rows.append({**dict(zip(by, key)), "metric": name, "questions": len(w), "benchmark": int(b.sum()),
-                         "new_by_M1": new["m1"], "new_by_M2": new["m2"], "new_by_M3": new["m3"],
+                         **{f"new_by_{p.upper()}": new[p] for p in parts},
                          "sum": total, "union": union, "double_counted": total - union,
                          "sum_rate": total / len(w), "union_rate": union / len(w)})
     return pd.DataFrame(rows)
