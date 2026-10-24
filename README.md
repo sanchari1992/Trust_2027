@@ -1769,3 +1769,8 @@ For the paper give `--real-file` a held-out real sample that was not used to des
 * **Graph view** in the web page and API (`POST /api/graph`; every `/api/mutate` result carries `graph_before`, `graph`, `graph_summary`). Full description, the reason for it and its limits: **`docs/WEBPAGE.md`**. Code: `src/service/graphs.py`.
 * **Patient-conflict scoring (fix).** For a `patient_conflict` prompt the right behaviour is to say that the question cannot be answered or that the answer may not apply to this patient. Giving the standard answer as if the profile did not matter (`answered_core`) now counts as a failure and as wrong behaviour (before, it counted as correct). Results produced with earlier versions must be re-evaluated.
 * **Patient profiles only go on questions.** ARES writes declarative statements; a profile in front of a statement made the system refuse because there was no question. Patient operators are skipped for non-questions (`is_question` in `src/mutate/userinfo.py`); those items get another Premise operator. The conflict prompt now asks for a medical situation, not an occupation.
+
+
+## 37. The final evaluation tables (`scripts/final_tables.py`)
+
+`python scripts/final_tables.py --profile paper` writes `results/paper_final/final_tables.tex` (booktabs, ready for the paper) and `final_tables.md` from the finished paper run (no LLM calls): T1 deviation of generated from real prompts; T2 closeness after M2/M3; T3 hallucination, failure and refusal rates; T4 paired tests; T5 M3 by operator; T6 what the system does with a patient profile or an unsupported detail; T7 where the new failures come from; T8 M3 with and without the patient-conflict prompts; T9 failures found. Run the realism step with `--heldout` first (README 35).

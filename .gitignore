@@ -9,3 +9,5 @@ __pycache__/
 .venv/
 /logs
 /results_10questions
+/results_500_Oct24
+/send500
